@@ -1,3 +1,4 @@
+//internal/stream/manager.go
 package stream
 
 import (
@@ -29,7 +30,7 @@ type Stream struct {
 	Target    string
 	IsUDP     bool
 	State     int32
-	connID    int32
+	connID    int32 // 【修复】改为私有，使用 atomic 操作
 	CreatedAt time.Time
 
 	// TCP 连接
@@ -58,7 +59,7 @@ func NewStream(id uint32, target string, isUDP bool) *Stream {
 		Target:    target,
 		IsUDP:     isUDP,
 		State:     int32(StateInit),
-		connID:    -1,
+		connID:    -1, // 【修复】初始值为 -1
 		CreatedAt: time.Now(),
 		DataCh:    make(chan []byte, 64),
 		Connected: make(chan bool, 1),
@@ -66,10 +67,12 @@ func NewStream(id uint32, target string, isUDP bool) *Stream {
 	}
 }
 
+// 【新增】SetConnID 设置绑定的连接 ID（线程安全）
 func (s *Stream) SetConnID(id int) {
 	atomic.StoreInt32(&s.connID, int32(id))
 }
 
+// 【新增】GetConnID 获取绑定的连接 ID（线程安全）
 func (s *Stream) GetConnID() int {
 	return int(atomic.LoadInt32(&s.connID))
 }
@@ -86,8 +89,11 @@ func (s *Stream) IsClosed() bool {
 	return s.GetState() == StateClosed
 }
 
+
+
 func (s *Stream) Close() {
 	s.closeOnce.Do(func() {
+		// ✅ 简化：直接设置状态即可，closeOnce 已保证只执行一次
 		atomic.StoreInt32(&s.State, int32(StateClosed))
 
 		close(s.CloseCh)
@@ -101,6 +107,7 @@ func (s *Stream) Close() {
 		}
 		s.mu.Unlock()
 
+		// 排空数据通道
 		for {
 			select {
 			case <-s.DataCh:
@@ -117,6 +124,10 @@ func (s *Stream) Close() {
 		metrics.DecrActiveStreams()
 	})
 }
+
+
+
+
 
 func (s *Stream) Write(data []byte) (int, error) {
 	if s.IsClosed() {
@@ -194,7 +205,7 @@ func (s *Stream) WaitConnected(timeout time.Duration) bool {
 // ==================== 流管理器 ====================
 
 type Manager struct {
-	streams sync.Map
+	streams sync.Map // map[uint32]*Stream
 	counter uint32
 }
 
@@ -265,3 +276,5 @@ func (m *Manager) CleanupTimeout(timeout time.Duration) int {
 	})
 	return count
 }
+
+
