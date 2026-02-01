@@ -1,6 +1,7 @@
 
 
 //cmd/server/main.go
+
 package main
 
 import (
@@ -34,7 +35,6 @@ func main() {
 	configPath := flag.String("c", "", "配置文件路径")
 	showVersion := flag.Bool("v", false, "显示版本")
 
-	// 命令行参数覆盖
 	listenAddr := flag.String("l", "", "监听地址")
 	certFile := flag.String("cert", "", "TLS证书")
 	keyFile := flag.String("key", "", "TLS私钥")
@@ -50,13 +50,11 @@ func main() {
 		return
 	}
 
-	// 加载配置
 	cfg, err := config.LoadServerConfig(*configPath)
 	if err != nil {
 		plog.Fatalf("Load config failed: %v", err)
 	}
 
-	// 命令行参数覆盖
 	if *listenAddr != "" {
 		cfg.Listen = *listenAddr
 	}
@@ -73,25 +71,20 @@ func main() {
 		cfg.WSPath = *wsPath
 	}
 
-	// 验证配置
 	if err := cfg.Validate(); err != nil {
 		plog.Fatalf("Config validation failed: %v", err)
 	}
 
-	// 设置日志级别
 	plog.SetLevel(cfg.LogLevel)
 
-	// 创建服务
 	srv := NewServer(cfg)
 
-	// 启动
 	if err := srv.Start(); err != nil {
 		plog.Fatalf("Start failed: %v", err)
 	}
 
 	printBanner(cfg)
 
-	// 等待信号
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
@@ -147,10 +140,8 @@ func (s *Server) Start() error {
 }
 
 func (s *Server) Stop() {
-	// 1. 停止接受新连接
 	s.httpSrv.SetKeepAlivesEnabled(false)
 
-	// 2. 等待现有请求完成（最多30秒）
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -174,7 +165,6 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	metrics.IncrActiveConnections()
 	metrics.IncrTotalConnections()
 
-	// 每个 Session 创建独立的 StreamManager
 	sessionStreamMgr := stream.NewManager()
 	session := server.NewSession(clientID, conn, sessionStreamMgr, s.cfg)
 	session.Serve()
@@ -186,7 +176,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(`<!DOCTYPE html><html><head><title>Welcome</title></head><body><h1>It works!</h1></body></html>`))
+	_, _ = w.Write([]byte(`<!DOCTYPE html><html><head><title>Welcome</title></head><body><h1>It works!</h1></body></html>`))
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -207,13 +197,13 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	json.NewEncoder(w).Encode(response)
+	_ = json.NewEncoder(w).Encode(response)
 }
 
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(metrics.ExportPrometheus()))
+	_, _ = w.Write([]byte(metrics.ExportPrometheus()))
 }
 
 func printBanner(cfg *config.ServerConfig) {
@@ -232,7 +222,9 @@ func printBanner(cfg *config.ServerConfig) {
 	fmt.Println("╠══════════════════════════════════════════════════════════╣")
 	fmt.Println("║  健康检查: /health  |  监控指标: /metrics                 ║")
 	fmt.Println("║  按 Ctrl+C 停止                                          ║")
-	fmt.Println("╚══════════════════════════════════════════════════════════╝")
+	fmt.Println("╚══���═══════════════════════════════════════════════════════╝")
 	fmt.Println()
 }
+
+
 
