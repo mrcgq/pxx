@@ -30,22 +30,22 @@ import (
 // ==================== 常量定义 ====================
 
 const (
-	TokenValiditySeconds = 300
-	DefaultWriteTimeout  = 10 * time.Second
-	DefaultReadTimeout   = 60 * time.Second
-	DefaultPingInterval  = 30 * time.Second
+	TokenValiditySeconds  = 300
+	DefaultWriteTimeout   = 10 * time.Second
+	DefaultReadTimeout    = 60 * time.Second
+	DefaultPingInterval   = 30 * time.Second
 	DefaultWriteQueueSize = 4096
-	CloseGracePeriod     = 5 * time.Second
+	CloseGracePeriod      = 5 * time.Second
 )
 
 // ==================== 错误定义 ====================
 
 var (
-	ErrConnectionClosed   = errors.New("connection closed")
-	ErrWriteTimeout       = errors.New("write timeout")
-	ErrWriteQueueFull     = errors.New("write queue full")
-	ErrConnectionClosing  = errors.New("connection closing")
-	ErrAuthFailed         = errors.New("authentication failed")
+	ErrConnectionClosed  = errors.New("connection closed")
+	ErrWriteTimeout      = errors.New("write timeout")
+	ErrWriteQueueFull    = errors.New("write queue full")
+	ErrConnectionClosing = errors.New("connection closing")
+	ErrAuthFailed        = errors.New("authentication failed")
 )
 
 // ==================== 写任务 ====================
@@ -59,24 +59,24 @@ type WriteJob struct {
 // ==================== WebSocket 连接包装器 ====================
 
 type WSConn struct {
-	ID         int
-	conn       *websocket.Conn
-	writeCh    chan WriteJob
-	closed     int32
-	ctx        context.Context
-	cancel     context.CancelFunc
-	closeOnce  sync.Once
-	closeMu    sync.Mutex
-	
+	ID        int
+	conn      *websocket.Conn
+	writeCh   chan WriteJob
+	closed    int32
+	ctx       context.Context
+	cancel    context.CancelFunc
+	closeOnce sync.Once
+	closeMu   sync.Mutex
+
 	// 活跃时间
 	lastActive int64 // Unix nano
-	
+
 	// 统计
 	bytesSent   int64
 	bytesRecv   int64
 	packetsSent int64
 	packetsRecv int64
-	
+
 	// 配置
 	writeTimeout time.Duration
 	readTimeout  time.Duration
@@ -86,7 +86,7 @@ func NewWSConn(id int, conn *websocket.Conn, queueSize int) *WSConn {
 	if queueSize <= 0 {
 		queueSize = DefaultWriteQueueSize
 	}
-	
+
 	ctx, cancel := context.WithCancel(context.Background())
 	return &WSConn{
 		ID:           id,
@@ -121,13 +121,11 @@ func (w *WSConn) Send(data []byte, priority bool) error {
 		Priority: priority,
 	}
 
-	// 优先消息直接尝试发送
 	if priority {
 		select {
 		case w.writeCh <- job:
 			return nil
 		default:
-			// 队列满，尝试等待
 		}
 	}
 
@@ -158,7 +156,6 @@ func (w *WSConn) SendSync(data []byte, timeout time.Duration) error {
 		Done:     make(chan error, 1),
 	}
 
-	// 发送到队列
 	select {
 	case w.writeCh <- job:
 	case <-time.After(timeout):
@@ -167,7 +164,6 @@ func (w *WSConn) SendSync(data []byte, timeout time.Duration) error {
 		return ErrConnectionClosing
 	}
 
-	// 等待写入完成
 	select {
 	case err := <-job.Done:
 		return err
@@ -182,21 +178,18 @@ func (w *WSConn) SendSync(data []byte, timeout time.Duration) error {
 func (w *WSConn) Close() {
 	w.closeOnce.Do(func() {
 		atomic.StoreInt32(&w.closed, 1)
-		
-		// 取消 context
+
 		w.cancel()
 
-		// 尝试发送关闭帧
 		if w.conn != nil {
-			w.conn.SetWriteDeadline(time.Now().Add(CloseGracePeriod))
-			w.conn.WriteMessage(
+			_ = w.conn.SetWriteDeadline(time.Now().Add(CloseGracePeriod))
+			_ = w.conn.WriteMessage(
 				websocket.CloseMessage,
 				websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
 			)
 			w.conn.Close()
 		}
 
-		// 排空写队列并通知等待者
 		w.drainWriteChannel()
 	})
 }
@@ -246,15 +239,17 @@ func (w *WSConn) WriteMessage(msgType int, data []byte) error {
 	if w.IsClosed() {
 		return ErrConnectionClosed
 	}
-	
+
 	w.closeMu.Lock()
 	defer w.closeMu.Unlock()
-	
+
 	if w.conn == nil {
 		return ErrConnectionClosed
 	}
-	
-	w.conn.SetWriteDeadline(time.Now().Add(w.writeTimeout))
+
+	if err := w.conn.SetWriteDeadline(time.Now().Add(w.writeTimeout)); err != nil {
+		return err
+	}
 	err := w.conn.WriteMessage(msgType, data)
 	if err == nil {
 		atomic.AddInt64(&w.bytesSent, int64(len(data)))
@@ -269,7 +264,7 @@ func (w *WSConn) ReadMessage() (int, []byte, error) {
 	if w.IsClosed() {
 		return 0, nil, ErrConnectionClosed
 	}
-	
+
 	msgType, data, err := w.conn.ReadMessage()
 	if err == nil {
 		atomic.AddInt64(&w.bytesRecv, int64(len(data)))
@@ -314,15 +309,17 @@ func (w *WSConn) Ping() error {
 	if w.IsClosed() {
 		return ErrConnectionClosed
 	}
-	
+
 	w.closeMu.Lock()
 	defer w.closeMu.Unlock()
-	
+
 	if w.conn == nil {
 		return ErrConnectionClosed
 	}
-	
-	w.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+
+	if err := w.conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return err
+	}
 	return w.conn.WriteMessage(websocket.PingMessage, nil)
 }
 
@@ -405,12 +402,10 @@ func (d *Dialer) DialWithContext(ctx context.Context, serverURL string, clientID
 		return nil, fmt.Errorf("parse URL: %w", err)
 	}
 
-	// 添加客户端 ID 参数
 	q := u.Query()
 	q.Set("id", clientID)
 	u.RawQuery = q.Encode()
 
-	// 构建 TLS 配置
 	tlsConfig, err := d.buildTLSConfig(u.Hostname())
 	if err != nil {
 		return nil, fmt.Errorf("build TLS config: %w", err)
@@ -421,16 +416,14 @@ func (d *Dialer) DialWithContext(ctx context.Context, serverURL string, clientID
 		HandshakeTimeout:  10 * time.Second,
 		ReadBufferSize:    64 * 1024,
 		WriteBufferSize:   64 * 1024,
-		EnableCompression: false, // 不启用压缩，避免 CRIME 攻击
+		EnableCompression: false,
 	}
 
-	// 设置认证 token
 	if d.cfg.Token != "" {
 		signedToken := GenerateSignedToken(d.cfg.Token, clientID)
 		dialer.Subprotocols = []string{signedToken}
 	}
 
-	// 使用 context 进行拨号
 	conn, resp, err := dialer.DialContext(ctx, u.String(), nil)
 	if err != nil {
 		if resp != nil {
@@ -456,7 +449,6 @@ func (d *Dialer) buildTLSConfig(hostname string) (*tls.Config, error) {
 	if d.cfg.EnableECH && !d.cfg.Insecure {
 		tlsConfig, err = ech.BuildTLSConfig(hostname, d.cfg.Insecure)
 		if err != nil {
-			// ECH 失败时回退到普通 TLS
 			tlsConfig = &tls.Config{
 				MinVersion:         tls.VersionTLS13,
 				ServerName:         hostname,
@@ -502,7 +494,6 @@ func NewUpgrader(cfg *config.ServerConfig) *Upgrader {
 			EnableCompression: false,
 			CheckOrigin:       func(r *http.Request) bool { return true },
 			Error: func(w http.ResponseWriter, r *http.Request, status int, reason error) {
-				// 自定义错误处理，避免泄露信息
 				http.Error(w, http.StatusText(status), status)
 			},
 		},
@@ -512,7 +503,6 @@ func NewUpgrader(cfg *config.ServerConfig) *Upgrader {
 func (u *Upgrader) Upgrade(w http.ResponseWriter, r *http.Request) (*websocket.Conn, string, error) {
 	var clientID string
 
-	// Token 验证
 	if u.cfg.Token != "" {
 		protocols := websocket.Subprotocols(r)
 		valid := false
@@ -529,17 +519,15 @@ func (u *Upgrader) Upgrade(w http.ResponseWriter, r *http.Request) (*websocket.C
 		}
 	}
 
-	// 升级连接
 	conn, err := u.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return nil, "", err
 	}
 
-	// 如果没有从 token 获取到客户端 ID，尝试从 URL 参数获取
 	if clientID == "" {
 		clientID = r.URL.Query().Get("id")
 		if clientID == "" {
-			clientID = fmt.Sprintf("anon-%s-%d", 
+			clientID = fmt.Sprintf("anon-%s-%d",
 				strings.ReplaceAll(r.RemoteAddr, ":", "-"),
 				time.Now().UnixNano()%100000)
 		}
@@ -549,18 +537,15 @@ func (u *Upgrader) Upgrade(w http.ResponseWriter, r *http.Request) (*websocket.C
 }
 
 func (u *Upgrader) validateToken(tokenStr string) (clientID string, valid bool) {
-	// 支持简单 token（向后兼容）
 	parts := strings.SplitN(tokenStr, ":", 3)
 
 	if len(parts) == 1 {
-		// 简单 token 模式
 		if tokenStr == u.cfg.Token {
 			return "", true
 		}
 		return "", false
 	}
 
-	// 签名 token 模式: clientID:timestamp:signature
 	if len(parts) != 3 {
 		return "", false
 	}
@@ -569,7 +554,6 @@ func (u *Upgrader) validateToken(tokenStr string) (clientID string, valid bool) 
 	timestampStr := parts[1]
 	signature := parts[2]
 
-	// 验证时间戳
 	timestamp, err := strconv.ParseInt(timestampStr, 10, 64)
 	if err != nil {
 		return "", false
@@ -580,7 +564,6 @@ func (u *Upgrader) validateToken(tokenStr string) (clientID string, valid bool) 
 		return "", false
 	}
 
-	// 验证签名
 	message := fmt.Sprintf("%s:%s", clientID, timestampStr)
 	mac := hmac.New(sha256.New, []byte(u.cfg.Token))
 	mac.Write([]byte(message))
@@ -608,7 +591,6 @@ func IsNormalClose(err error) bool {
 		return false
 	}
 
-	// 检查 WebSocket 关闭错误
 	var ce *websocket.CloseError
 	if errors.As(err, &ce) {
 		switch ce.Code {
@@ -620,12 +602,10 @@ func IsNormalClose(err error) bool {
 		return false
 	}
 
-	// 检查网络错误
 	if errors.Is(err, net.ErrClosed) {
 		return true
 	}
 
-	// 检查是否是 "use of closed network connection"
 	if strings.Contains(err.Error(), "use of closed network connection") {
 		return true
 	}
@@ -635,10 +615,7 @@ func IsNormalClose(err error) bool {
 
 // IsTemporaryError 检查是否是临时错误
 func IsTemporaryError(err error) bool {
-	if ne, ok := err.(net.Error); ok {
-		return ne.Temporary()
-	}
-	return false
+	return IsTimeoutError(err)
 }
 
 // IsTimeoutError 检查是否是超时错误
@@ -648,5 +625,4 @@ func IsTimeoutError(err error) bool {
 	}
 	return false
 }
-
 
