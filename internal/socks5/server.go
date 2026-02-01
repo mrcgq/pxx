@@ -1,6 +1,7 @@
 
-//internal/socks5/server.go
 
+
+//internal/socks5/server.go
 package socks5
 
 import (
@@ -80,59 +81,51 @@ type GetUplinkFunc func(streamID uint32) (connID int, ok bool)
 
 type udpSession struct {
 	streamID   uint32
-	stream     *stream.Stream  // 关联的流
+	stream     *stream.Stream
 	targetAddr string
-	clientAddr *net.UDPAddr    // 客户端 UDP 地址
-	udpConn    *net.UDPConn    // 关联的 UDP 连接（用于发送响应）
-	opened     int32           // 原子操作
-	lastActive int64           // Unix timestamp，原子操作
+	clientAddr *net.UDPAddr
+	udpConn    *net.UDPConn
+	opened     int32
+	lastActive int64
 	createTime time.Time
 	mu         sync.RWMutex
 }
 
-// isOpened 检查会话是否已打开
 func (s *udpSession) isOpened() bool {
 	return atomic.LoadInt32(&s.opened) == 1
 }
 
-// setOpened 设置会话为已打开
 func (s *udpSession) setOpened() bool {
 	return atomic.CompareAndSwapInt32(&s.opened, 0, 1)
 }
 
-// touch 更新最后活动时间
 func (s *udpSession) touch() {
 	atomic.StoreInt64(&s.lastActive, time.Now().Unix())
 }
 
-// isExpired 检查会话是否过期
 func (s *udpSession) isExpired(timeout time.Duration) bool {
 	lastActive := time.Unix(atomic.LoadInt64(&s.lastActive), 0)
 	return time.Since(lastActive) > timeout
 }
 
-// setClientAddr 设置客户端地址
 func (s *udpSession) setClientAddr(addr *net.UDPAddr) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.clientAddr = addr
 }
 
-// getClientAddr 获取客户端地址
 func (s *udpSession) getClientAddr() *net.UDPAddr {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.clientAddr
 }
 
-// setUDPConn 设置 UDP 连接
 func (s *udpSession) setUDPConn(conn *net.UDPConn) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.udpConn = conn
 }
 
-// getUDPConn 获取 UDP 连接
 func (s *udpSession) getUDPConn() *net.UDPConn {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -142,11 +135,11 @@ func (s *udpSession) getUDPConn() *net.UDPConn {
 // ==================== UDP 会话管理器 ====================
 
 type udpSessionManager struct {
-	sessions     map[string]*udpSession   // key: clientAddr + "|" + target
-	byStreamID   map[uint32]*udpSession   // 通过 streamID 查找会话
-	mu           sync.RWMutex
-	stopCh       chan struct{}
-	wg           sync.WaitGroup
+	sessions   map[string]*udpSession
+	byStreamID map[uint32]*udpSession
+	mu         sync.RWMutex
+	stopCh     chan struct{}
+	wg         sync.WaitGroup
 }
 
 func newUDPSessionManager() *udpSessionManager {
@@ -158,29 +151,24 @@ func newUDPSessionManager() *udpSessionManager {
 	return m
 }
 
-// start 启动清理协程
 func (m *udpSessionManager) start() {
 	m.wg.Add(1)
 	go m.cleanupLoop()
 }
 
-// stop 停止管理器
 func (m *udpSessionManager) stop() {
 	close(m.stopCh)
 	m.wg.Wait()
 }
 
-// makeKey 生成会话 key（包含客户端地址以隔离不同客户端）
 func (m *udpSessionManager) makeKey(clientAddr, target string) string {
 	return clientAddr + "|" + target
 }
 
-// getOrCreate 获取或创建会话
 func (m *udpSessionManager) getOrCreate(clientAddr *net.UDPAddr, target string, streamIDGen func() uint32, udpConn *net.UDPConn) (*udpSession, bool) {
 	clientKey := clientAddr.String()
 	key := m.makeKey(clientKey, target)
 
-	// 快速路径：读锁检查
 	m.mu.RLock()
 	if session, ok := m.sessions[key]; ok {
 		session.touch()
@@ -189,11 +177,9 @@ func (m *udpSessionManager) getOrCreate(clientAddr *net.UDPAddr, target string, 
 	}
 	m.mu.RUnlock()
 
-	// 慢速路径：写锁创建
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// 双重检查
 	if session, ok := m.sessions[key]; ok {
 		session.touch()
 		return session, false
@@ -213,38 +199,16 @@ func (m *udpSessionManager) getOrCreate(clientAddr *net.UDPAddr, target string, 
 	return session, true
 }
 
-// get 获取会话
-func (m *udpSessionManager) get(clientAddr, target string) *udpSession {
-	key := m.makeKey(clientAddr, target)
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.sessions[key]
-}
-
-// getByStreamID 通过 streamID 获取会话
 func (m *udpSessionManager) getByStreamID(streamID uint32) *udpSession {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.byStreamID[streamID]
 }
 
-// remove 删除会话
-func (m *udpSessionManager) remove(clientAddr, target string) {
-	key := m.makeKey(clientAddr, target)
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	
-	if session, ok := m.sessions[key]; ok {
-		delete(m.byStreamID, session.streamID)
-		delete(m.sessions, key)
-	}
-}
-
-// removeByStreamID 通过 streamID 删除会话
 func (m *udpSessionManager) removeByStreamID(streamID uint32) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	
+
 	if session, ok := m.byStreamID[streamID]; ok {
 		clientKey := ""
 		if session.clientAddr != nil {
@@ -256,7 +220,6 @@ func (m *udpSessionManager) removeByStreamID(streamID uint32) {
 	}
 }
 
-// cleanupLoop 清理过期会话
 func (m *udpSessionManager) cleanupLoop() {
 	defer m.wg.Done()
 
@@ -273,7 +236,6 @@ func (m *udpSessionManager) cleanupLoop() {
 	}
 }
 
-// cleanup 清理过期会话
 func (m *udpSessionManager) cleanup() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -287,21 +249,19 @@ func (m *udpSessionManager) cleanup() {
 	}
 }
 
-// closeAll 关闭所有会话
 func (m *udpSessionManager) closeAll(broadcastFunc BroadcastFunc) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	for _, session := range m.sessions {
 		if broadcastFunc != nil && session.isOpened() {
-			broadcastFunc(proto.CmdClose, session.streamID, nil)
+			_ = broadcastFunc(proto.CmdClose, session.streamID, nil)
 		}
 	}
 	m.sessions = make(map[string]*udpSession)
 	m.byStreamID = make(map[uint32]*udpSession)
 }
 
-// count 返回会话数量
 func (m *udpSessionManager) count() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -325,31 +285,24 @@ type Server struct {
 	listener  net.Listener
 	streamMgr *stream.Manager
 
-	// 认证
 	username string
 	password string
 
-	// 回调函数
 	sendToFunc    SendToFunc
 	broadcastFunc BroadcastFunc
 	getUplinkFunc GetUplinkFunc
 
-	// UDP 会话管理
 	udpSessions *udpSessionManager
 
-	// IP 策略
 	ipStrategy byte
 
-	// 连接限制
 	maxConnections int64
 	activeConns    int64
 
-	// 统计
 	totalConns     int64
 	totalRequests  int64
 	failedRequests int64
 
-	// 生命周期控制
 	ctx      context.Context
 	cancel   context.CancelFunc
 	stopOnce sync.Once
@@ -357,7 +310,6 @@ type Server struct {
 	stopped  int32
 }
 
-// NewServer 创建 SOCKS5 服务器
 func NewServer(cfg *config.ClientConfig, mgr *stream.Manager) *Server {
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -371,7 +323,6 @@ func NewServer(cfg *config.ClientConfig, mgr *stream.Manager) *Server {
 		cancel:         cancel,
 	}
 
-	// 解析认证信息
 	if cfg.Socks5Auth != "" {
 		parts := strings.SplitN(cfg.Socks5Auth, ":", 2)
 		if len(parts) == 2 {
@@ -383,27 +334,22 @@ func NewServer(cfg *config.ClientConfig, mgr *stream.Manager) *Server {
 	return s
 }
 
-// SetSendToFunc 设置发送到指定连接的回调
 func (s *Server) SetSendToFunc(f SendToFunc) {
 	s.sendToFunc = f
 }
 
-// SetBroadcastFunc 设置广播回调
 func (s *Server) SetBroadcastFunc(f BroadcastFunc) {
 	s.broadcastFunc = f
 }
 
-// SetGetUplinkFunc 设置获取上行连接的回调
 func (s *Server) SetGetUplinkFunc(f GetUplinkFunc) {
 	s.getUplinkFunc = f
 }
 
-// SetMaxConnections 设置最大连接数
 func (s *Server) SetMaxConnections(max int64) {
 	atomic.StoreInt64(&s.maxConnections, max)
 }
 
-// Stats 返回服务器统计信息
 func (s *Server) Stats() ServerStats {
 	return ServerStats{
 		ActiveConnections: atomic.LoadInt64(&s.activeConns),
@@ -414,7 +360,6 @@ func (s *Server) Stats() ServerStats {
 	}
 }
 
-// Start 启动服务器
 func (s *Server) Start() error {
 	addr := s.cfg.Socks5Listen
 	if addr == "" {
@@ -427,10 +372,8 @@ func (s *Server) Start() error {
 	}
 	s.listener = listener
 
-	// 启动 UDP 会话管理器
 	s.udpSessions.start()
 
-	// 启动接受连接循环
 	s.wg.Add(1)
 	go s.acceptLoop()
 
@@ -438,35 +381,28 @@ func (s *Server) Start() error {
 	return nil
 }
 
-// Stop 停止服务器
 func (s *Server) Stop() {
 	s.stopOnce.Do(func() {
 		atomic.StoreInt32(&s.stopped, 1)
 		s.cancel()
 
 		if s.listener != nil {
-			s.listener.Close()
+			_ = s.listener.Close()
 		}
 
-		// 停止 UDP 会话管理器
 		s.udpSessions.stop()
-
-		// 关闭所有 UDP 会话
 		s.udpSessions.closeAll(s.broadcastFunc)
 
-		// 等待所有 goroutine 完成
 		s.wg.Wait()
 
 		plog.Info("[SOCKS5] Server stopped")
 	})
 }
 
-// IsStopped 检查服务器是否已停止
 func (s *Server) IsStopped() bool {
 	return atomic.LoadInt32(&s.stopped) == 1
 }
 
-// acceptLoop 接受连接循环
 func (s *Server) acceptLoop() {
 	defer s.wg.Done()
 
@@ -490,9 +426,8 @@ func (s *Server) acceptLoop() {
 			}
 		}
 
-		// 检查连接限制
 		if !s.acquireConnection() {
-			conn.Close()
+			_ = conn.Close()
 			plog.Debug("[SOCKS5] Connection limit reached, rejecting")
 			continue
 		}
@@ -508,7 +443,6 @@ func (s *Server) acceptLoop() {
 	}
 }
 
-// acquireConnection 获取连接槽位
 func (s *Server) acquireConnection() bool {
 	for {
 		current := atomic.LoadInt64(&s.activeConns)
@@ -523,26 +457,25 @@ func (s *Server) acquireConnection() bool {
 	}
 }
 
-// releaseConnection 释放连接槽位
 func (s *Server) releaseConnection() {
 	atomic.AddInt64(&s.activeConns, -1)
 }
 
-// handleConnection 处理单个连接
 func (s *Server) handleConnection(conn net.Conn) {
-	defer conn.Close()
+	defer func() {
+		_ = conn.Close()
+	}()
 
-	// 设置握手超时
-	conn.SetDeadline(time.Now().Add(HandshakeTimeout))
+	if err := conn.SetDeadline(time.Now().Add(HandshakeTimeout)); err != nil {
+		return
+	}
 
-	// SOCKS5 握手
 	if err := s.handshake(conn); err != nil {
 		plog.Debug("[SOCKS5] Handshake failed: %v", err)
 		atomic.AddInt64(&s.failedRequests, 1)
 		return
 	}
 
-	// 读取请求
 	cmd, atyp, addr, port, err := s.readRequest(conn)
 	if err != nil {
 		plog.Debug("[SOCKS5] Read request failed: %v", err)
@@ -550,12 +483,12 @@ func (s *Server) handleConnection(conn net.Conn) {
 		return
 	}
 
-	// 清除超时
-	conn.SetDeadline(time.Time{})
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		return
+	}
 
 	atomic.AddInt64(&s.totalRequests, 1)
 
-	// 使用正确的 IPv6 格式化
 	target := proto.FormatHostPort(addr, port)
 
 	switch cmd {
@@ -569,11 +502,9 @@ func (s *Server) handleConnection(conn net.Conn) {
 	}
 }
 
-// handshake 执行 SOCKS5 握手
 func (s *Server) handshake(conn net.Conn) error {
 	buf := make([]byte, 256)
 
-	// 读取版本和方法数量
 	if _, err := io.ReadFull(conn, buf[:2]); err != nil {
 		return err
 	}
@@ -581,15 +512,12 @@ func (s *Server) handshake(conn net.Conn) error {
 		return ErrInvalidVersion
 	}
 
-	// 读取支持的方法
 	nmethods := int(buf[1])
 	if _, err := io.ReadFull(conn, buf[:nmethods]); err != nil {
 		return err
 	}
 
-	// 选择认证方法
 	if s.username != "" {
-		// 需要用户名密码认证
 		hasUserPass := false
 		for i := 0; i < nmethods; i++ {
 			if buf[i] == AuthUserPass {
@@ -598,23 +526,20 @@ func (s *Server) handshake(conn net.Conn) error {
 			}
 		}
 		if !hasUserPass {
-			conn.Write([]byte{Version5, AuthNoAccept})
+			_, _ = conn.Write([]byte{Version5, AuthNoAccept})
 			return ErrAuthFailed
 		}
-		conn.Write([]byte{Version5, AuthUserPass})
+		_, _ = conn.Write([]byte{Version5, AuthUserPass})
 		return s.authenticateUserPass(conn)
 	}
 
-	// 无需认证
-	conn.Write([]byte{Version5, AuthNone})
+	_, _ = conn.Write([]byte{Version5, AuthNone})
 	return nil
 }
 
-// authenticateUserPass 用户名密码认证
 func (s *Server) authenticateUserPass(conn net.Conn) error {
 	buf := make([]byte, 256)
 
-	// 读取认证版本
 	if _, err := io.ReadFull(conn, buf[:1]); err != nil {
 		return err
 	}
@@ -622,7 +547,6 @@ func (s *Server) authenticateUserPass(conn net.Conn) error {
 		return errors.New("invalid auth version")
 	}
 
-	// 读取用户名
 	if _, err := io.ReadFull(conn, buf[:1]); err != nil {
 		return err
 	}
@@ -635,7 +559,6 @@ func (s *Server) authenticateUserPass(conn net.Conn) error {
 	}
 	username := string(buf[:ulen])
 
-	// 读取密码
 	if _, err := io.ReadFull(conn, buf[:1]); err != nil {
 		return err
 	}
@@ -648,21 +571,18 @@ func (s *Server) authenticateUserPass(conn net.Conn) error {
 	}
 	password := string(buf[:plen])
 
-	// 验证
 	if username == s.username && password == s.password {
-		conn.Write([]byte{0x01, 0x00})
+		_, _ = conn.Write([]byte{0x01, 0x00})
 		return nil
 	}
 
-	conn.Write([]byte{0x01, 0x01})
+	_, _ = conn.Write([]byte{0x01, 0x01})
 	return ErrAuthFailed
 }
 
-// readRequest 读取 SOCKS5 请求
 func (s *Server) readRequest(conn net.Conn) (cmd, atyp byte, addr string, port uint16, err error) {
 	buf := make([]byte, 256)
 
-	// 读取请求头
 	if _, err = io.ReadFull(conn, buf[:4]); err != nil {
 		return
 	}
@@ -672,10 +592,8 @@ func (s *Server) readRequest(conn net.Conn) (cmd, atyp byte, addr string, port u
 	}
 
 	cmd = buf[1]
-	// buf[2] 是保留字段
 	atyp = buf[3]
 
-	// 读取地址
 	switch atyp {
 	case AtypIPv4:
 		if _, err = io.ReadFull(conn, buf[:4]); err != nil {
@@ -697,7 +615,6 @@ func (s *Server) readRequest(conn net.Conn) (cmd, atyp byte, addr string, port u
 		}
 		addr = string(buf[:domainLen])
 
-		// 验证域名
 		if verr := proto.ValidateHost(addr); verr != nil {
 			err = verr
 			return
@@ -714,7 +631,6 @@ func (s *Server) readRequest(conn net.Conn) (cmd, atyp byte, addr string, port u
 		return
 	}
 
-	// 读取端口
 	if _, err = io.ReadFull(conn, buf[:2]); err != nil {
 		return
 	}
@@ -723,7 +639,6 @@ func (s *Server) readRequest(conn net.Conn) (cmd, atyp byte, addr string, port u
 	return
 }
 
-// sendReply 发送 SOCKS5 响应
 func (s *Server) sendReply(conn net.Conn, rep byte, bindAddr net.Addr) {
 	reply := []byte{Version5, rep, 0x00, AtypIPv4, 0, 0, 0, 0, 0, 0}
 
@@ -735,7 +650,6 @@ func (s *Server) sendReply(conn net.Conn, rep byte, bindAddr net.Addr) {
 				reply[8] = byte(tcpAddr.Port >> 8)
 				reply[9] = byte(tcpAddr.Port)
 			} else if ip6 := tcpAddr.IP.To16(); ip6 != nil {
-				// IPv6 响应
 				reply = make([]byte, 22)
 				reply[0] = Version5
 				reply[1] = rep
@@ -748,38 +662,33 @@ func (s *Server) sendReply(conn net.Conn, rep byte, bindAddr net.Addr) {
 		}
 	}
 
-	conn.Write(reply)
+	_, _ = conn.Write(reply)
 }
 
-// handleConnect 处理 CONNECT 命令
 func (s *Server) handleConnect(conn net.Conn, target, host string, port uint16, atyp byte) {
-	// 检查 IP 策略
 	if !s.checkIPStrategy(host, atyp) {
 		s.sendReply(conn, RepNotAllowed, nil)
 		atomic.AddInt64(&s.failedRequests, 1)
 		return
 	}
 
-	// 发送成功响应（0-RTT：先响应再建立连接）
 	s.sendReply(conn, RepSuccess, nil)
 
-	// 尝试读取初始数据（0-RTT）
-	conn.SetReadDeadline(time.Now().Add(InitDataReadTimeout))
+	if err := conn.SetReadDeadline(time.Now().Add(InitDataReadTimeout)); err != nil {
+		return
+	}
 	initBuf := make([]byte, proto.MaxInitData)
 	n, _ := conn.Read(initBuf)
-	conn.SetReadDeadline(time.Time{})
+	_ = conn.SetReadDeadline(time.Time{})
 	initData := initBuf[:n]
 
-	// 创建流
 	streamID := s.streamMgr.NewStreamID()
 	st := stream.NewStream(streamID, target, false)
 	st.SetState(stream.StateConnecting)
 	s.streamMgr.Register(st)
 
-	// 构建 Open 命令
 	payload := proto.BuildOpenPayload(s.ipStrategy, host, port, initData)
 
-	// 发送 Open 命令
 	if s.broadcastFunc != nil {
 		if err := s.broadcastFunc(proto.CmdOpenTCP, streamID, payload); err != nil {
 			plog.Warn("[SOCKS5] Failed to send open command: %v", err)
@@ -791,11 +700,9 @@ func (s *Server) handleConnect(conn net.Conn, target, host string, port uint16, 
 
 	plog.Debug("[SOCKS5] CONNECT %s (InitData: %d bytes)", target, len(initData))
 
-	// 开始数据转发
 	s.relay(conn, st)
 }
 
-// relay 数据转发
 func (s *Server) relay(conn net.Conn, st *stream.Stream) {
 	var wg sync.WaitGroup
 
@@ -803,22 +710,20 @@ func (s *Server) relay(conn net.Conn, st *stream.Stream) {
 		st.Close()
 		wg.Wait()
 
-		// 发送关闭命令
 		if s.getUplinkFunc != nil {
 			if connID, ok := s.getUplinkFunc(st.ID); ok && s.sendToFunc != nil {
-				s.sendToFunc(connID, proto.CmdClose, st.ID, nil)
+				_ = s.sendToFunc(connID, proto.CmdClose, st.ID, nil)
 			} else if s.broadcastFunc != nil {
-				s.broadcastFunc(proto.CmdClose, st.ID, nil)
+				_ = s.broadcastFunc(proto.CmdClose, st.ID, nil)
 			}
 		} else if s.broadcastFunc != nil {
-			s.broadcastFunc(proto.CmdClose, st.ID, nil)
+			_ = s.broadcastFunc(proto.CmdClose, st.ID, nil)
 		}
 
-		conn.Close()
+		_ = conn.Close()
 		s.streamMgr.Unregister(st.ID)
 	}()
 
-	// 从本地连接读取数据发送到远程
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -836,7 +741,9 @@ func (s *Server) relay(conn net.Conn, st *stream.Stream) {
 			default:
 			}
 
-			conn.SetReadDeadline(time.Now().Add(RelayIdleTimeout))
+			if err := conn.SetReadDeadline(time.Now().Add(RelayIdleTimeout)); err != nil {
+				return
+			}
 			nr, err := conn.Read(buf)
 			if err != nil {
 				return
@@ -846,12 +753,11 @@ func (s *Server) relay(conn net.Conn, st *stream.Stream) {
 				data := make([]byte, nr)
 				copy(data, buf[:nr])
 
-				// 发送数据
 				connID := st.GetConnID()
 				if connID >= 0 && s.sendToFunc != nil {
-					s.sendToFunc(connID, proto.CmdData, st.ID, data)
+					_ = s.sendToFunc(connID, proto.CmdData, st.ID, data)
 				} else if s.broadcastFunc != nil {
-					s.broadcastFunc(proto.CmdData, st.ID, data)
+					_ = s.broadcastFunc(proto.CmdData, st.ID, data)
 				}
 
 				metrics.AddBytesSent(int64(nr))
@@ -859,14 +765,15 @@ func (s *Server) relay(conn net.Conn, st *stream.Stream) {
 		}
 	}()
 
-	// 从远程接收数据写入本地连接
 	for {
 		select {
 		case data, ok := <-st.DataCh:
 			if !ok {
 				return
 			}
-			conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+				return
+			}
 			if _, err := conn.Write(data); err != nil {
 				return
 			}
@@ -881,9 +788,7 @@ func (s *Server) relay(conn net.Conn, st *stream.Stream) {
 	}
 }
 
-// handleUDPAssociate 处理 UDP ASSOCIATE 命令
 func (s *Server) handleUDPAssociate(conn net.Conn) {
-	// 创建 UDP 监听器
 	localIP := conn.LocalAddr().(*net.TCPAddr).IP
 	udpAddr := &net.UDPAddr{IP: localIP, Port: 0}
 	udpListener, err := net.ListenUDP("udp", udpAddr)
@@ -893,13 +798,11 @@ func (s *Server) handleUDPAssociate(conn net.Conn) {
 		return
 	}
 
-	// 发送成功响应，告知客户端 UDP 端口
 	actualAddr := udpListener.LocalAddr().(*net.UDPAddr)
 	s.sendReply(conn, RepSuccess, &net.TCPAddr{IP: actualAddr.IP, Port: actualAddr.Port})
 
 	plog.Debug("[SOCKS5] UDP ASSOCIATE on %s", actualAddr)
 
-	// 启动 UDP 转发
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -907,7 +810,6 @@ func (s *Server) handleUDPAssociate(conn net.Conn) {
 		s.handleUDPRelay(udpListener)
 	}()
 
-	// 等待 TCP 连接关闭（表示 UDP 会话结束）
 	buf := make([]byte, 1)
 	for {
 		if _, err := conn.Read(buf); err != nil {
@@ -915,12 +817,10 @@ func (s *Server) handleUDPAssociate(conn net.Conn) {
 		}
 	}
 
-	// 清理
-	udpListener.Close()
+	_ = udpListener.Close()
 	wg.Wait()
 }
 
-// handleUDPRelay UDP 数据转发
 func (s *Server) handleUDPRelay(udpListener *net.UDPConn) {
 	bufPtr := transport.GetBuffer(64 * 1024)
 	buf := *bufPtr
@@ -933,30 +833,28 @@ func (s *Server) handleUDPRelay(udpListener *net.UDPConn) {
 		default:
 		}
 
-		udpListener.SetReadDeadline(time.Now().Add(UDPSessionIdleTimeout))
+		if err := udpListener.SetReadDeadline(time.Now().Add(UDPSessionIdleTimeout)); err != nil {
+			return
+		}
 		n, clientAddr, err := udpListener.ReadFromUDP(buf)
 		if err != nil {
-			// 检查是否是超时
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				continue
 			}
 			return
 		}
 
-		// 解析 UDP 包
 		target, data, err := ParseUDPPacket(buf[:n])
 		if err != nil {
 			plog.Debug("[SOCKS5] Invalid UDP packet: %v", err)
 			continue
 		}
 
-		// 获取或创建会话（使用客户端地址作为隔离）
 		session, isNew := s.udpSessions.getOrCreate(clientAddr, target, s.streamMgr.NewStreamID, udpListener)
 
 		if isNew {
 			plog.Debug("[SOCKS5] New UDP session: %s -> %s (streamID=%d)", clientAddr, target, session.streamID)
-			
-			// 创建并注册流
+
 			st := stream.NewStream(session.streamID, target, true)
 			st.SetState(stream.StateConnecting)
 			st.UDPConn = udpListener
@@ -965,12 +863,10 @@ func (s *Server) handleUDPRelay(udpListener *net.UDPConn) {
 			s.streamMgr.Register(st)
 		}
 
-		// 更新活动时间和客户端地址
 		session.touch()
 		session.setClientAddr(clientAddr)
 		session.setUDPConn(udpListener)
 
-		// 如果会话未打开，发送 Open 命令
 		if session.setOpened() {
 			host, port, err := proto.ParseHostPort(target)
 			if err != nil {
@@ -985,14 +881,12 @@ func (s *Server) handleUDPRelay(udpListener *net.UDPConn) {
 					continue
 				}
 			}
-			
-			// 更新流状态
+
 			if session.stream != nil {
 				session.stream.SetState(stream.StateConnected)
 			}
 		}
 
-		// 发送数据
 		if s.broadcastFunc != nil {
 			if err := s.broadcastFunc(proto.CmdData, session.streamID, data); err != nil {
 				plog.Debug("[SOCKS5] Failed to send UDP data: %v", err)
@@ -1003,8 +897,6 @@ func (s *Server) handleUDPRelay(udpListener *net.UDPConn) {
 	}
 }
 
-// HandleUDPResponse 处理服务端返回的 UDP 响应数据
-// 这个方法应该在客户端收到服务端的 UDP 数据时调用
 func (s *Server) HandleUDPResponse(streamID uint32, data []byte) error {
 	session := s.udpSessions.getByStreamID(streamID)
 	if session == nil {
@@ -1013,21 +905,18 @@ func (s *Server) HandleUDPResponse(streamID uint32, data []byte) error {
 
 	clientAddr := session.getClientAddr()
 	udpConn := session.getUDPConn()
-	
+
 	if clientAddr == nil || udpConn == nil {
 		return errors.New("UDP session not ready")
 	}
 
-	// 解析目标地址用于构建响应包
 	host, port, err := proto.ParseHostPort(session.targetAddr)
 	if err != nil {
 		return err
 	}
 
-	// 构建 SOCKS5 UDP 响应包
 	responsePacket := BuildUDPPacket(host, port, data)
 
-	// 发送给客户端
 	_, err = udpConn.WriteToUDP(responsePacket, clientAddr)
 	if err != nil {
 		plog.Debug("[SOCKS5] Failed to send UDP response to client: %v", err)
@@ -1036,23 +925,19 @@ func (s *Server) HandleUDPResponse(streamID uint32, data []byte) error {
 
 	session.touch()
 	metrics.AddBytesRecv(int64(len(data)))
-	
+
 	return nil
 }
 
-// HandleUDPClose 处理 UDP 会话关闭
 func (s *Server) HandleUDPClose(streamID uint32) {
 	session := s.udpSessions.getByStreamID(streamID)
 	if session != nil {
-		// 注销流
 		s.streamMgr.Unregister(streamID)
-		// 删除会话
 		s.udpSessions.removeByStreamID(streamID)
 		plog.Debug("[SOCKS5] UDP session closed: streamID=%d", streamID)
 	}
 }
 
-// checkIPStrategy 检查 IP 策略
 func (s *Server) checkIPStrategy(host string, atyp byte) bool {
 	ip := net.ParseIP(host)
 
@@ -1071,7 +956,6 @@ func (s *Server) checkIPStrategy(host string, atyp byte) bool {
 
 // ==================== 辅助函数 ====================
 
-// parseIPStrategy 解析 IP 策略字符串
 func parseIPStrategy(s string) byte {
 	s = strings.TrimSpace(s)
 	switch s {
@@ -1088,7 +972,6 @@ func parseIPStrategy(s string) byte {
 	}
 }
 
-// isClosedError 检查是否是关闭错误
 func isClosedError(err error) bool {
 	if err == nil {
 		return false
@@ -1098,13 +981,11 @@ func isClosedError(err error) bool {
 
 // ==================== UDP 包解析 ====================
 
-// ParseUDPPacket 解析 SOCKS5 UDP 包
 func ParseUDPPacket(b []byte) (target string, data []byte, err error) {
 	if len(b) < 10 {
 		return "", nil, errors.New("packet too short")
 	}
 
-	// 检查保留字段
 	if b[2] != 0 {
 		return "", nil, errors.New("fragmentation not supported")
 	}
@@ -1150,14 +1031,12 @@ func ParseUDPPacket(b []byte) (target string, data []byte, err error) {
 	port := binary.BigEndian.Uint16(b[off : off+2])
 	off += 2
 
-	// 使用正确的 IPv6 格式化
 	target = proto.FormatHostPort(host, port)
 	data = b[off:]
 
 	return
 }
 
-// BuildUDPPacket 构建 SOCKS5 UDP 包
 func BuildUDPPacket(host string, port uint16, data []byte) []byte {
 	buf := []byte{0, 0, 0}
 
@@ -1178,5 +1057,12 @@ func BuildUDPPacket(host string, port uint16, data []byte) []byte {
 
 	return buf
 }
+
+
+
+
+
+
+
 
 
