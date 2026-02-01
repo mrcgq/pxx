@@ -122,16 +122,11 @@ func BuildTLSConfig(serverName string, insecure bool) (*tls.Config, error) {
 	roots, _ := x509.SystemCertPool()
 
 	return &tls.Config{
-		MinVersion:                     tls.VersionTLS13,
-		ServerName:                     serverName,
-		EncryptedClientHelloConfigList: ech,
-		EncryptedClientHelloRejectionVerify: func(cs tls.ConnectionState) error {
-			return errors.New("ECH rejected")
-		},
-		RootCAs:            roots,
-		InsecureSkipVerify: insecure,
-	}, nil
-}
+    MinVersion:         tls.VersionTLS13,
+    ServerName:         serverName,
+    RootCAs:            roots,
+    InsecureSkipVerify: insecure,
+}, nil
 
 func queryHTTPSRecord(domain, dnsServer string) (string, error) {
 	if strings.HasPrefix(dnsServer, "http://") || strings.HasPrefix(dnsServer, "https://") {
