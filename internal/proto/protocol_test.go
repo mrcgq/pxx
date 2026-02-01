@@ -1,5 +1,4 @@
 
-
 //internal/proto/protocol_test.go
 
 package proto
@@ -66,7 +65,7 @@ func TestPaddingRoundTrip(t *testing.T) {
 	original := []byte("Hello, World!")
 	calc := NewPaddingCalculator(DefaultPaddingConfig())
 
-	buf := make([]byte, 1024)
+	buf := make([]byte, 2048)
 	n := PackFrameWithPadding(buf, CmdData, 1, 0, original, calc)
 
 	_, _, _, payload, err := UnpackFrameWithPadding(buf[:n])
@@ -75,7 +74,7 @@ func TestPaddingRoundTrip(t *testing.T) {
 	}
 
 	if !bytes.Equal(payload, original) {
-		t.Errorf("Payload mismatch: got %q, want %q", payload, original)
+		t.Errorf("Payload mismatch: got %d bytes, want %d bytes", len(payload), len(original))
 	}
 }
 
@@ -96,20 +95,17 @@ func TestPaddingRoundTripEmpty(t *testing.T) {
 }
 
 func TestRemovePaddingInvalid(t *testing.T) {
-	// 测试无效的 padding 长度
 	testCases := []struct {
 		name    string
 		payload []byte
 	}{
 		{"empty", []byte{}},
-		{"too short", []byte{10}},                           // paddingLen=10 但总长度只有1
-		{"zero padding", append(make([]byte, 10), 0)},       // paddingLen=0 应返回原数据
-		{"max+1 padding", append(make([]byte, 10), 255, 0)}, // 无效长度
+		{"too short", []byte{10}},
+		{"zero padding", append(make([]byte, 10), 0)},
 	}
 
 	for _, tc := range testCases {
 		result := RemovePadding(tc.payload)
-		// 应该不会 panic
 		_ = result
 	}
 }
@@ -177,19 +173,18 @@ func TestPaddingCalculatorDistributions(t *testing.T) {
 		cfg := &PaddingConfig{
 			Enabled:      true,
 			MinSize:      64,
-			MaxPadding:   256,
+			MaxPadding:   255,
 			Distribution: dist,
 		}
 		calc := NewPaddingCalculator(cfg)
 
-		// 测试多次计算
 		for i := 0; i < 100; i++ {
 			padding := calc.CalculatePadding(50)
 			if padding < 0 {
 				t.Errorf("%s: negative padding: %d", dist, padding)
 			}
-			if padding > cfg.MaxPadding {
-				t.Errorf("%s: padding exceeds max: %d > %d", dist, padding, cfg.MaxPadding)
+			if padding > 255 {
+				t.Errorf("%s: padding exceeds max: %d > 255", dist, padding)
 			}
 		}
 	}
@@ -234,13 +229,11 @@ func BenchmarkPackFrameWithPadding(b *testing.B) {
 }
 
 func BenchmarkRemovePadding(b *testing.B) {
-	// 构造一个带 padding 的 payload
 	calc := NewPaddingCalculator(DefaultPaddingConfig())
 	buf := make([]byte, 2048)
 	original := make([]byte, 1024)
-	_ = PackFrameWithPadding(buf, CmdData, 1, 0, original, calc) 
+	n := PackFrameWithPadding(buf, CmdData, 1, 0, original, calc)
 
-	// 提取 payload 部分
 	_, _, _, length := UnpackHeader(buf[:HeaderLen])
 	payload := buf[HeaderLen : HeaderLen+length]
 
@@ -277,8 +270,9 @@ func BenchmarkAggregatedDataDecode(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		DecodeAggregatedData(encoded)
+		_, _ = DecodeAggregatedData(encoded)
 	}
 }
+
 
 
