@@ -1,7 +1,5 @@
 
-
 //pkg/log/logger.go
-
 package log
 
 import (
@@ -25,7 +23,7 @@ const (
 )
 
 var (
-	level      int32 = int32(INFO) // 使用原子操作
+	level      int32 = int32(INFO)
 	logger     = log.New(os.Stdout, "", log.LstdFlags|log.Lshortfile)
 	mu         sync.RWMutex
 	levelNames = map[Level]string{
@@ -93,7 +91,7 @@ func Debug(format string, v ...any) {
 	if Level(atomic.LoadInt32(&level)) <= DEBUG {
 		mu.RLock()
 		defer mu.RUnlock()
-		logger.Output(2, fmt.Sprintf("[DEBUG] "+format, v...))
+		_ = logger.Output(2, fmt.Sprintf("[DEBUG] "+format, v...))
 	}
 }
 
@@ -102,7 +100,7 @@ func Info(format string, v ...any) {
 	if Level(atomic.LoadInt32(&level)) <= INFO {
 		mu.RLock()
 		defer mu.RUnlock()
-		logger.Output(2, fmt.Sprintf("[INFO] "+format, v...))
+		_ = logger.Output(2, fmt.Sprintf("[INFO] "+format, v...))
 	}
 }
 
@@ -111,7 +109,7 @@ func Warn(format string, v ...any) {
 	if Level(atomic.LoadInt32(&level)) <= WARN {
 		mu.RLock()
 		defer mu.RUnlock()
-		logger.Output(2, fmt.Sprintf("[WARN] "+format, v...))
+		_ = logger.Output(2, fmt.Sprintf("[WARN] "+format, v...))
 	}
 }
 
@@ -120,7 +118,7 @@ func Error(format string, v ...any) {
 	if Level(atomic.LoadInt32(&level)) <= ERROR {
 		mu.RLock()
 		defer mu.RUnlock()
-		logger.Output(2, fmt.Sprintf("[ERROR] "+format, v...))
+		_ = logger.Output(2, fmt.Sprintf("[ERROR] "+format, v...))
 	}
 }
 
@@ -137,7 +135,7 @@ func Println(v ...any) {
 // Fatalf 致命错误并退出
 func Fatalf(format string, v ...any) {
 	mu.RLock()
-	logger.Output(2, fmt.Sprintf("[FATAL] "+format, v...))
+	_ = logger.Output(2, fmt.Sprintf("[FATAL] "+format, v...))
 	mu.RUnlock()
 	os.Exit(1)
 }
@@ -145,7 +143,7 @@ func Fatalf(format string, v ...any) {
 // Fatal 致命错误并退出
 func Fatal(v ...any) {
 	mu.RLock()
-	logger.Output(2, fmt.Sprintf("[FATAL] %s", fmt.Sprint(v...)))
+	_ = logger.Output(2, fmt.Sprintf("[FATAL] %s", fmt.Sprint(v...)))
 	mu.RUnlock()
 	os.Exit(1)
 }
@@ -170,7 +168,7 @@ func IsErrorEnabled() bool {
 	return Level(atomic.LoadInt32(&level)) <= ERROR
 }
 
-// WithPrefix 返回带前缀的日志记录器
+// PrefixLogger 带前缀的日志记录器
 type PrefixLogger struct {
 	prefix string
 }
@@ -199,5 +197,7 @@ func (p *PrefixLogger) Warn(format string, v ...any) {
 func (p *PrefixLogger) Error(format string, v ...any) {
 	Error(p.prefix+format, v...)
 }
+
+
 
 
