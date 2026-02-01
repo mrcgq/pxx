@@ -1,0 +1,60 @@
+	  
+		  
+//.gitignore
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+phantom-x-server
+phantom-x-client
+/bin/
+/dist/
+
+# Test binary
+*.test
+
+# Output of go coverage
+*.out
+coverage.html
+
+# Dependency directories
+vendor/
+
+# Go workspace file
+go.work
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Config files with secrets
+configs/server.yaml
+configs/client.yaml
+!configs/*.example.yaml
+
+# TLS certificates
+*.pem
+*.crt
+*.key
+certs/
+
+# Build artifacts
+*.tar.gz
+*.zip
+
+# Temporary files
+tmp/
+temp/
