@@ -22,7 +22,7 @@
 #═══════════════════════════════════════════════════════════════════════════════
 set -euo pipefail
 # ==================== 全局变量 ====================
-readonly SCRIPT_VERSION="2.0.0"
+readonly SCRIPT_VERSION="v1.1"
 readonly GITHUB_REPO="mrcgq/px"
 readonly GITHUB_RAW_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/main"
 readonly GITHUB_API_URL="https://api.github.com/repos/${GITHUB_REPO}"
