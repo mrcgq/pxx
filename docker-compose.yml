@@ -1,0 +1,45 @@
+
+
+//docker-compose.yml
+
+
+version: '3.8'
+
+services:
+  server:
+    build:
+      context: .
+      target: server
+    container_name: phantom-x-server
+    restart: unless-stopped
+    ports:
+      - "443:443"
+    volumes:
+      - ./configs/server.yaml:/app/config.yaml:ro
+      - ./certs:/app/certs:ro
+    environment:
+      - TZ=Asia/Shanghai
+    networks:
+      - phantom-x
+
+  client:
+    build:
+      context: .
+      target: client
+    container_name: phantom-x-client
+    restart: unless-stopped
+    ports:
+      - "1080:1080"
+    volumes:
+      - ./configs/client.yaml:/app/config.yaml:ro
+    environment:
+      - TZ=Asia/Shanghai
+    depends_on:
+      - server
+    networks:
+      - phantom-x
+
+networks:
+  phantom-x:
+    driver: bridge
+
