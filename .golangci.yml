@@ -1,0 +1,25 @@
+run:
+  timeout: 5m
+  
+linters:
+  enable:
+    - errcheck
+    - staticcheck
+    - unused
+    - govet
+    - gosimple
+  
+linters-settings:
+  errcheck:
+    # 忽略某些常见的无害错误
+    exclude-functions:
+      - (io.Closer).Close
+      - (net.Conn).Close
+      - (*os.File).Close
+      
+issues:
+  exclude-rules:
+    # 忽略测试文件中的某些错误
+    - path: _test\.go
+      linters:
+        - errcheck
