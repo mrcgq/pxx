@@ -1,6 +1,3 @@
-
-
-//scripts/install.sh
 #!/usr/bin/env bash
 #═══════════════════════════════════════════════════════════════════════════════
 #                     Phantom-X 一键安装脚本 v2.0
@@ -20,19 +17,26 @@
 #   help      - 显示帮助
 #
 #═══════════════════════════════════════════════════════════════════════════════
+
 set -euo pipefail
+
 # ==================== 全局变量 ====================
-readonly SCRIPT_VERSION="v1.1"
+readonly SCRIPT_VERSION="1.1"
 readonly GITHUB_REPO="mrcgq/px"
 readonly GITHUB_RAW_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/main"
 readonly GITHUB_API_URL="https://api.github.com/repos/${GITHUB_REPO}"
 readonly GITHUB_RELEASE_URL="https://github.com/${GITHUB_REPO}/releases/download"
+
 readonly INSTALL_DIR="/opt/phantom-x"
 readonly CONFIG_DIR="/etc/phantom-x"
 readonly LOG_DIR="/var/log/phantom-x"
 readonly SERVICE_NAME="phantom-x"
 readonly BINARY_NAME_SERVER="phantom-x-server"
 readonly BINARY_NAME_CLIENT="phantom-x-client"
+
+# 默认版本（当无法从 GitHub 获取时使用）
+readonly DEFAULT_VERSION="2.0.0"
+
 # 颜色定义
 readonly RED='\033[0;31m'
 readonly GREEN='\033[0;32m'
@@ -43,6 +47,7 @@ readonly CYAN='\033[0;36m'
 readonly WHITE='\033[1;37m'
 readonly NC='\033[0m' # No Color
 readonly BOLD='\033[1m'
+
 # 运行时变量
 OS=""
 ARCH=""
@@ -52,32 +57,40 @@ FORCE_INSTALL=false
 SKIP_SERVICE=false
 CUSTOM_PORT=""
 CUSTOM_TOKEN=""
+CUSTOM_VERSION=""
+
 # ==================== 工具函数 ====================
+
 # 日志函数
 log_info()  { echo -e "${GREEN}[✓]${NC} $1"; }
 log_warn()  { echo -e "${YELLOW}[!]${NC} $1"; }
 log_error() { echo -e "${RED}[✗]${NC} $1"; }
 log_step()  { echo -e "${BLUE}[→]${NC} $1"; }
 log_debug() { [[ "${DEBUG:-}" == "1" ]] && echo -e "${PURPLE}[D]${NC} $1" || true; }
+
 # 致命错误
 die() {
     log_error "$1"
     exit "${2:-1}"
 }
+
 # 检查命令是否存在
 command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
+
 # 检查是否为 root
 is_root() {
     [[ $EUID -eq 0 ]]
 }
+
 # 需要 root 权限
 require_root() {
     if ! is_root; then
         die "请使用 root 权限运行此脚本，或使用 sudo"
     fi
 }
+
 # 确认操作
 confirm() {
     local prompt="${1:-确认继续?}"
@@ -94,11 +107,14 @@ confirm() {
     
     [[ "$response" =~ ^[Yy]$ ]]
 }
+
 # 打印分隔线
 print_separator() {
     echo -e "${CYAN}════════════════════════════════════════════════════════════════${NC}"
 }
+
 # ==================== Banner ====================
+
 print_banner() {
     echo -e "${CYAN}"
     cat << 'EOF'
@@ -112,13 +128,16 @@ print_banner() {
 EOF
     echo -e "${NC}"
 }
+
 print_mini_banner() {
     echo -e "${CYAN}╔══════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${CYAN}║${NC}           ${BOLD}Phantom-X Installer v${SCRIPT_VERSION}${NC}                       ${CYAN}║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 }
+
 # ==================== 系统检测 ====================
+
 detect_os() {
     local uname_s
     uname_s=$(uname -s)
@@ -143,6 +162,7 @@ detect_os() {
     
     log_debug "检测到操作系统: $OS"
 }
+
 detect_arch() {
     local uname_m
     uname_m=$(uname -m)
@@ -192,6 +212,7 @@ detect_arch() {
     
     log_debug "检测到 CPU 架构: $ARCH"
 }
+
 detect_init_system() {
     if [[ -d /run/systemd/system ]]; then
         echo "systemd"
@@ -205,6 +226,7 @@ detect_init_system() {
         echo "unknown"
     fi
 }
+
 detect_package_manager() {
     if command_exists apt-get; then
         echo "apt"
@@ -224,6 +246,7 @@ detect_package_manager() {
         echo "unknown"
     fi
 }
+
 get_distro_info() {
     local distro="unknown"
     local version="unknown"
@@ -243,7 +266,9 @@ get_distro_info() {
     
     echo "${distro}:${version}"
 }
+
 # ==================== 依赖检查 ====================
+
 check_dependencies() {
     local missing=()
     local required=("curl" "tar" "gzip")
@@ -298,6 +323,7 @@ check_dependencies() {
         log_info "依赖安装完成"
     fi
 }
+
 check_optional_dependencies() {
     local optional=("openssl" "wget" "jq")
     local missing=()
@@ -312,7 +338,9 @@ check_optional_dependencies() {
         log_debug "可选依赖缺失: ${missing[*]}"
     fi
 }
+
 # ==================== 网络函数 ====================
+
 # 带重试的下载
 download_file() {
     local url="$1"
@@ -323,6 +351,7 @@ download_file() {
     
     while [[ $retry -lt $max_retry ]]; do
         log_step "下载 $description (尝试 $((retry + 1))/$max_retry)"
+        log_debug "下载 URL: $url"
         
         if curl -fSL --progress-bar \
             --connect-timeout 30 \
@@ -347,27 +376,97 @@ download_file() {
     
     return 1
 }
-# 获取最新版本号
+
+# 获取最新版本号 (改进版)
 get_latest_version() {
     local version=""
-    local api_url="${GITHUB_API_URL}/releases/latest"
     
-    # 尝试从 releases/latest 获取
-    version=$(curl -s --connect-timeout 10 --max-time 30 "$api_url" 2>/dev/null | \
-        grep '"tag_name"' | head -1 | sed -E 's/.*"v?([^"]+)".*/\1/' || echo "")
+    log_debug "正在获取最新版本..."
     
-    # 如果失败，尝试从 tags 获取
-    if [[ -z "$version" ]]; then
-        version=$(curl -s --connect-timeout 10 --max-time 30 \
-            "${GITHUB_API_URL}/tags" 2>/dev/null | \
-            grep '"name"' | head -1 | sed -E 's/.*"v?([^"]+)".*/\1/' || echo "")
+    # 方法1: 从 releases/latest API 获取
+    log_debug "尝试方法1: releases/latest API"
+    version=$(curl -sL --connect-timeout 10 --max-time 30 \
+        -H "Accept: application/vnd.github.v3+json" \
+        "${GITHUB_API_URL}/releases/latest" 2>/dev/null | \
+        grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | \
+        head -1 | \
+        sed 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' | \
+        sed 's/^v//')
+    
+    if [[ -n "$version" ]] && [[ "$version" != "null" ]]; then
+        log_debug "方法1成功: $version"
+        echo "$version"
+        return 0
     fi
     
-    # 清理版本号前缀
-    version="${version#v}"
+    # 方法2: 从 releases 列表获取
+    log_debug "尝试方法2: releases 列表"
+    version=$(curl -sL --connect-timeout 10 --max-time 30 \
+        -H "Accept: application/vnd.github.v3+json" \
+        "${GITHUB_API_URL}/releases" 2>/dev/null | \
+        grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | \
+        head -1 | \
+        sed 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' | \
+        sed 's/^v//')
     
-    echo "$version"
+    if [[ -n "$version" ]] && [[ "$version" != "null" ]]; then
+        log_debug "方法2成功: $version"
+        echo "$version"
+        return 0
+    fi
+    
+    # 方法3: 从 tags 获取
+    log_debug "尝试方法3: tags API"
+    version=$(curl -sL --connect-timeout 10 --max-time 30 \
+        -H "Accept: application/vnd.github.v3+json" \
+        "${GITHUB_API_URL}/tags" 2>/dev/null | \
+        grep -o '"name"[[:space:]]*:[[:space:]]*"[^"]*"' | \
+        head -1 | \
+        sed 's/.*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' | \
+        sed 's/^v//')
+    
+    if [[ -n "$version" ]] && [[ "$version" != "null" ]]; then
+        log_debug "方法3成功: $version"
+        echo "$version"
+        return 0
+    fi
+    
+    # 方法4: 从 GitHub releases 页面 HTML 解析
+    log_debug "尝试方法4: releases 页面解析"
+    version=$(curl -sL --connect-timeout 10 --max-time 30 \
+        "https://github.com/${GITHUB_REPO}/releases" 2>/dev/null | \
+        grep -oE '/releases/tag/v?[0-9]+\.[0-9]+\.[0-9]+' | \
+        head -1 | \
+        grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+    
+    if [[ -n "$version" ]]; then
+        log_debug "方法4成功: $version"
+        echo "$version"
+        return 0
+    fi
+    
+    # 方法5: 使用 wget 作为备用
+    if command_exists wget; then
+        log_debug "尝试方法5: wget"
+        version=$(wget -qO- --timeout=10 \
+            "${GITHUB_API_URL}/releases/latest" 2>/dev/null | \
+            grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | \
+            head -1 | \
+            sed 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' | \
+            sed 's/^v//')
+        
+        if [[ -n "$version" ]] && [[ "$version" != "null" ]]; then
+            log_debug "方法5成功: $version"
+            echo "$version"
+            return 0
+        fi
+    fi
+    
+    log_debug "所有方法均失败"
+    echo ""
+    return 1
 }
+
 # 获取当前安装版本
 get_installed_version() {
     local binary="$1"
@@ -379,6 +478,7 @@ get_installed_version() {
     
     echo "$version"
 }
+
 # 版本比较 (返回: 0=相等, 1=v1>v2, 2=v1<v2)
 compare_versions() {
     local v1="$1"
@@ -399,7 +499,9 @@ compare_versions() {
         echo 2
     fi
 }
+
 # ==================== 证书生成 ====================
+
 generate_self_signed_cert() {
     local cert_dir="$1"
     local domain="${2:-localhost}"
@@ -424,6 +526,7 @@ prompt = no
 default_md = sha256
 distinguished_name = dn
 x509_extensions = v3_req
+
 [dn]
 C = US
 ST = State
@@ -431,10 +534,12 @@ L = City
 O = Phantom-X
 OU = Tunnel Proxy
 CN = $domain
+
 [v3_req]
 basicConstraints = CA:FALSE
 keyUsage = nonRepudiation, digitalSignature, keyEncipherment
 subjectAltName = @alt_names
+
 [alt_names]
 DNS.1 = $domain
 DNS.2 = localhost
@@ -462,7 +567,9 @@ EOF
     
     return 0
 }
+
 # ==================== Token 生成 ====================
+
 generate_token() {
     local length="${1:-32}"
     
@@ -475,7 +582,9 @@ generate_token() {
         date +%s%N | sha256sum | head -c "$length"
     fi
 }
+
 # ==================== 服务管理 ====================
+
 create_systemd_service() {
     local service_type="$1"  # server 或 client
     local binary_path="$2"
@@ -493,6 +602,7 @@ Description=${description} - High Performance Tunnel Proxy
 Documentation=https://github.com/${GITHUB_REPO}
 After=network-online.target
 Wants=network-online.target
+
 [Service]
 Type=simple
 User=root
@@ -501,10 +611,12 @@ Restart=always
 RestartSec=3
 StartLimitInterval=60
 StartLimitBurst=5
+
 # 资源限制
 LimitNOFILE=1048576
 LimitNPROC=512
 LimitCORE=infinity
+
 # 安全加固
 NoNewPrivileges=true
 ProtectSystem=strict
@@ -516,12 +628,15 @@ ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictRealtime=true
 RestrictSUIDSGID=true
+
 # 日志
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=${service_name}
+
 # 环境变量
 Environment=GOMAXPROCS=0
+
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -531,6 +646,7 @@ EOF
     
     log_info "服务文件已创建: $service_file"
 }
+
 create_openrc_service() {
     local service_type="$1"
     local binary_path="$2"
@@ -543,18 +659,22 @@ create_openrc_service() {
     
     cat > "$service_file" << EOF
 #!/sbin/openrc-run
+
 name="Phantom-X ${service_type^}"
 description="High Performance Tunnel Proxy"
+
 command="${binary_path}"
 command_args="-c ${config_path}"
 command_background=true
 pidfile="/run/${service_name}.pid"
 output_log="${LOG_DIR}/${service_name}.log"
 error_log="${LOG_DIR}/${service_name}.err"
+
 depend() {
     need net
     after firewall
 }
+
 start_pre() {
     checkpath --directory --mode 0755 ${LOG_DIR}
 }
@@ -565,6 +685,7 @@ EOF
     
     log_info "服务文件已创建: $service_file"
 }
+
 create_launchd_service() {
     local service_type="$1"
     local binary_path="$2"
@@ -603,9 +724,6 @@ EOF
     log_info "服务文件已创建: $plist_file"
 }
 
-
-
-
 # 创建 logrotate 配置
 create_logrotate_config() {
     local logrotate_file="/etc/logrotate.d/phantom-x"
@@ -637,9 +755,6 @@ EOF
     log_info "logrotate 配置已创建: $logrotate_file"
 }
 
-
-
-
 # 优化内核参数（服务端）
 optimize_sysctl() {
     if [[ "$OS" != "linux" ]]; then
@@ -653,6 +768,7 @@ optimize_sysctl() {
     
     cat > "$sysctl_file" << 'EOF'
 # Phantom-X 网络性能优化
+
 # UDP 缓冲区
 net.core.rmem_max = 16777216
 net.core.wmem_max = 16777216
@@ -685,9 +801,6 @@ EOF
     log_info "内核参数已优化: $sysctl_file"
 }
 
-
-
-
 # 启用服务
 enable_service() {
     local service_type="$1"
@@ -706,6 +819,7 @@ enable_service() {
             ;;
     esac
 }
+
 # 启动服务
 start_service() {
     local service_type="$1"
@@ -728,6 +842,7 @@ start_service() {
             ;;
     esac
 }
+
 # 停止服务
 stop_service() {
     local service_type="$1"
@@ -746,6 +861,7 @@ stop_service() {
             ;;
     esac
 }
+
 # 检查服务状态
 is_service_running() {
     local service_type="$1"
@@ -767,7 +883,9 @@ is_service_running() {
             ;;
     esac
 }
+
 # ==================== 服务端安装 ====================
+
 install_server() {
     print_mini_banner
     require_root
@@ -779,11 +897,34 @@ install_server() {
     echo ""
     
     # 获取版本
-    VERSION=$(get_latest_version)
-    if [[ -z "$VERSION" ]]; then
-        die "无法获取版本信息，请检查网络连接或稍后重试"
+    if [[ -n "$CUSTOM_VERSION" ]]; then
+        VERSION="$CUSTOM_VERSION"
+        log_info "使用指定版本: v${VERSION}"
+    else
+        log_step "正在获取最新版本..."
+        VERSION=$(get_latest_version)
+        
+        if [[ -z "$VERSION" ]]; then
+            log_warn "无法从 GitHub 获取版本信息"
+            log_warn "可能的原因: 网络问题、API 限制、仓库无 releases"
+            echo ""
+            
+            # 询问是否使用默认版本
+            if confirm "是否使用默认版本 v${DEFAULT_VERSION}?" "y"; then
+                VERSION="$DEFAULT_VERSION"
+            else
+                # 让用户手动输入版本
+                read -rp "请输入版本号 (如 2.0.0): " user_version
+                if [[ -n "$user_version" ]]; then
+                    VERSION="${user_version#v}"
+                else
+                    die "未指定版本，安装终止"
+                fi
+            fi
+        fi
+        
+        log_info "目标版本: v${VERSION}"
     fi
-    log_info "最新版本: v${VERSION}"
     
     # 检查是否已安装
     local current_version
@@ -808,10 +949,20 @@ install_server() {
     temp_dir=$(mktemp -d)
     local archive_file="${temp_dir}/phantom-x-server.tar.gz"
     
+    log_debug "下载 URL: $download_url"
+    
     # 下载
     if ! download_file "$download_url" "$archive_file" "服务端二进制"; then
         rm -rf "$temp_dir"
-        die "下载失败，请检查网络或手动下载: $download_url"
+        echo ""
+        log_error "下载失败"
+        log_warn "请检查以下内容:"
+        echo "  1. 网络连接是否正常"
+        echo "  2. 版本号 v${VERSION} 是否存在"
+        echo "  3. 文件 ${BINARY_NAME_SERVER}-${OS}-${ARCH}.tar.gz 是否在 releases 中"
+        echo ""
+        echo "手动下载地址: $download_url"
+        die "安装终止"
     fi
     
     # 解压
@@ -821,22 +972,28 @@ install_server() {
         die "解压失败，文件可能已损坏"
     fi
     
+    # 列出解压后的文件（调试用）
+    log_debug "解压后文件: $(ls -la "$temp_dir")"
+    
     # 查找并安装二进制
     local binary_found=false
-    for name in "${BINARY_NAME_SERVER}" "${BINARY_NAME_SERVER}-${OS}-${ARCH}"; do
+    for name in "${BINARY_NAME_SERVER}" "${BINARY_NAME_SERVER}-${OS}-${ARCH}" "phantom-x-server" "server"; do
         if [[ -f "${temp_dir}/${name}" ]]; then
             # 停止现有服务
             stop_service "server" 2>/dev/null || true
             
             mv "${temp_dir}/${name}" "${INSTALL_DIR}/${BINARY_NAME_SERVER}"
             binary_found=true
+            log_debug "找到二进制文件: ${name}"
             break
         fi
     done
     
     if [[ "$binary_found" != "true" ]]; then
+        log_error "未找到可执行文件，解压目录内容:"
+        ls -la "$temp_dir"
         rm -rf "$temp_dir"
-        die "未找到可执行文件"
+        die "安装失败"
     fi
     
     # 设置权限
@@ -860,8 +1017,7 @@ install_server() {
         generate_self_signed_cert "$CONFIG_DIR" || true
     fi
     
-  
-        # 创建服务
+    # 创建服务
     if [[ "$SKIP_SERVICE" != "true" ]]; then
         local init_system
         init_system=$(detect_init_system)
@@ -904,27 +1060,36 @@ create_server_config() {
 # 生成时间: $(date '+%Y-%m-%d %H:%M:%S')
 # 版本: v${VERSION}
 # ═══════════════════════════════════════════════════════════════
+
 # 监听地址
 listen: ":${port}"
+
 # TLS 证书路径
 cert: "${CONFIG_DIR}/cert.pem"
 key: "${CONFIG_DIR}/key.pem"
+
 # 认证令牌（请妥善保管！）
 token: "${token}"
+
 # WebSocket 路径（建议修改以提高隐蔽性）
 ws_path: "/ws"
+
 # ═══════════════════════════════════════════════════════════════
 # 性能调优
 # ═══════════════════════════════════════════════════════════════
+
 # 每个连接的最大流数量
 max_streams_per_conn: 1000
+
 # 超时设置
 read_timeout: 60s
 write_timeout: 10s
 idle_timeout: 120s
+
 # ═══════════════════════════════════════════════════════════════
 # 日志设置
 # ═══════════════════════════════════════════════════════════════
+
 # 日志级别: debug, info, warn, error
 log_level: "info"
 EOF
@@ -940,6 +1105,7 @@ EOF
     print_separator
     echo ""
 }
+
 print_server_success() {
     echo ""
     print_separator
@@ -974,7 +1140,9 @@ print_server_success() {
     echo ""
     print_separator
 }
+
 # ==================== 客户端安装 ====================
+
 install_client() {
     print_mini_banner
     check_dependencies
@@ -985,11 +1153,30 @@ install_client() {
     echo ""
     
     # 获取版本
-    VERSION=$(get_latest_version)
-    if [[ -z "$VERSION" ]]; then
-        die "无法获取版本信息，请检查网络连接"
+    if [[ -n "$CUSTOM_VERSION" ]]; then
+        VERSION="$CUSTOM_VERSION"
+        log_info "使用指定版本: v${VERSION}"
+    else
+        log_step "正在获取最新版本..."
+        VERSION=$(get_latest_version)
+        
+        if [[ -z "$VERSION" ]]; then
+            log_warn "无法从 GitHub 获取版本信息"
+            
+            if confirm "是否使用默认版本 v${DEFAULT_VERSION}?" "y"; then
+                VERSION="$DEFAULT_VERSION"
+            else
+                read -rp "请输入版本号 (如 2.0.0): " user_version
+                if [[ -n "$user_version" ]]; then
+                    VERSION="${user_version#v}"
+                else
+                    die "未指定版本，安装终止"
+                fi
+            fi
+        fi
+        
+        log_info "目标版本: v${VERSION}"
     fi
-    log_info "最新版本: v${VERSION}"
     
     # 确定安装路径
     local install_path="/usr/local/bin/phantom-x"
@@ -1012,10 +1199,12 @@ install_client() {
     local download_url="${GITHUB_RELEASE_URL}/v${VERSION}/${BINARY_NAME_CLIENT}-${OS}-${ARCH}.tar.gz"
     local archive_file="${temp_dir}/phantom-x-client.tar.gz"
     
+    log_debug "下载 URL: $download_url"
+    
     # 下载
     if ! download_file "$download_url" "$archive_file" "客户端二进制"; then
         rm -rf "$temp_dir"
-        die "下载失败，请检查网络"
+        die "下载失败，请检查网络或版本号"
     fi
     
     # 解压
@@ -1027,16 +1216,19 @@ install_client() {
     
     # 查找可执行文件
     local binary_path=""
-    for name in "${BINARY_NAME_CLIENT}" "${BINARY_NAME_CLIENT}-${OS}-${ARCH}"; do
+    for name in "${BINARY_NAME_CLIENT}" "${BINARY_NAME_CLIENT}-${OS}-${ARCH}" "phantom-x-client" "client" "phantom-x"; do
         if [[ -f "${temp_dir}/${name}" ]]; then
             binary_path="${temp_dir}/${name}"
+            log_debug "找到二进制文件: ${name}"
             break
         fi
     done
     
     if [[ -z "$binary_path" ]]; then
+        log_error "未找到可执行文件，解压目录内容:"
+        ls -la "$temp_dir"
         rm -rf "$temp_dir"
-        die "未找到可执行文件"
+        die "安装失败"
     fi
     
     # 安装
@@ -1063,6 +1255,7 @@ install_client() {
     # 完成
     print_client_success "$config_dir"
 }
+
 create_client_config() {
     local config_dir="$1"
     
@@ -1070,38 +1263,51 @@ create_client_config() {
 # ═══════════════════════════════════════════════════════════════
 # Phantom-X 客户端配置
 # ═══════════════════════════════════════════════════════════════
+
 # 服务器地址 (必填)
 server: "wss://your-server.com:443/ws"
+
 # 认证令牌 (必填)
 token: "your-token-here"
+
 # 客户端 ID (留空自动生成)
 client_id: ""
+
 # ═══════════════════════════════════════════════════════════════
 # SOCKS5 代理设置
 # ═══════════════════════════════════════════════════════════════
+
 # SOCKS5 监听地址
 socks5_listen: ":1080"
+
 # SOCKS5 认证 (格式: user:pass，留空不验证)
 socks5_auth: ""
+
 # ═══════════════════════════════════════════════════════════════
 # 连接设置
 # ═══════════════════════════════════════════════════════════════
+
 # 连接池大小 (1-10)
 num_connections: 3
+
 # 超时设置
 write_timeout: 10s
 read_timeout: 60s
+
 # ═══════════════════════════════════════════════════════════════
 # TLS 设置
 # ═══════════════════════════════════════════════════════════════
+
 # 跳过证书验证 (仅测试用)
 insecure: false
+
 # ═══════════════════════════════════════════════════════════════
 # ECH (加密客户端握手) - 增强隐私保护
 # ═══════════════════════════════════════════════════════════════
 enable_ech: true
 ech_domain: "cloudflare-ech.com"
 ech_dns: "https://doh.pub/dns-query"
+
 # ═══════════════════════════════════════════════════════════════
 # 流量混淆 - 抗流量分析
 # ═══════════════════════════════════════════════════════════════
@@ -1109,11 +1315,13 @@ enable_padding: true
 padding_min_size: 64
 padding_max_size: 256
 padding_distribution: "mimicry"  # uniform, normal, mimicry
+
 # ═══════════════════════════════════════════════════════════════
 # IP 策略
 # ═══════════════════════════════════════════════════════════════
 # 可选值: "", "4", "6", "4,6", "6,4"
 ip_strategy: ""
+
 # ═══════════════════════════════════════════════════════════════
 # 日志设置
 # ═══════════════════════════════════════════════════════════════
@@ -1122,6 +1330,7 @@ EOF
     
     log_info "示例配置已创建: ${config_dir}/client.yaml"
 }
+
 print_client_success() {
     local config_dir="$1"
     
@@ -1153,7 +1362,9 @@ print_client_success() {
     echo ""
     print_separator
 }
+
 # ==================== 更新 ====================
+
 do_update() {
     print_mini_banner
     require_root
@@ -1184,9 +1395,19 @@ do_update() {
     fi
     
     # 获取最新版本
-    VERSION=$(get_latest_version)
-    if [[ -z "$VERSION" ]]; then
-        die "无法获取最新版本信息"
+    if [[ -n "$CUSTOM_VERSION" ]]; then
+        VERSION="$CUSTOM_VERSION"
+    else
+        VERSION=$(get_latest_version)
+        if [[ -z "$VERSION" ]]; then
+            log_warn "无法从 GitHub 获取最新版本"
+            read -rp "请输入目标版本号 (如 2.0.0): " user_version
+            if [[ -n "$user_version" ]]; then
+                VERSION="${user_version#v}"
+            else
+                die "未指定版本，更新终止"
+            fi
+        fi
     fi
     
     echo ""
@@ -1244,7 +1465,7 @@ do_update() {
         if download_file "$download_url" "$archive_file" "服务端"; then
             tar -xzf "$archive_file" -C "$temp_dir" 2>/dev/null
             
-            for name in "${BINARY_NAME_SERVER}" "${BINARY_NAME_SERVER}-${OS}-${ARCH}"; do
+            for name in "${BINARY_NAME_SERVER}" "${BINARY_NAME_SERVER}-${OS}-${ARCH}" "phantom-x-server" "server"; do
                 if [[ -f "${temp_dir}/${name}" ]]; then
                     mv "${temp_dir}/${name}" "${INSTALL_DIR}/${BINARY_NAME_SERVER}"
                     chmod +x "${INSTALL_DIR}/${BINARY_NAME_SERVER}"
@@ -1278,7 +1499,7 @@ do_update() {
             local install_path
             install_path=$(command -v phantom-x)
             
-            for name in "${BINARY_NAME_CLIENT}" "${BINARY_NAME_CLIENT}-${OS}-${ARCH}"; do
+            for name in "${BINARY_NAME_CLIENT}" "${BINARY_NAME_CLIENT}-${OS}-${ARCH}" "phantom-x-client" "client" "phantom-x"; do
                 if [[ -f "${temp_dir}/${name}" ]]; then
                     mv "${temp_dir}/${name}" "$install_path"
                     chmod +x "$install_path"
@@ -1297,7 +1518,9 @@ do_update() {
     echo ""
     log_info "更新完成！"
 }
+
 # ==================== 卸载 ====================
+
 do_uninstall() {
     print_mini_banner
     require_root
@@ -1349,9 +1572,7 @@ do_uninstall() {
     rm -f /usr/local/bin/phantom-x-server 2>/dev/null || true
     rm -f /usr/local/bin/phantom-x 2>/dev/null || true
     
-
-	
-	    # 删除日志目录
+    # 删除日志目录
     if [[ -d "$LOG_DIR" ]]; then
         rm -rf "$LOG_DIR"
         log_info "已删除日志目录: ${LOG_DIR}"
@@ -1370,7 +1591,7 @@ do_uninstall() {
         log_info "已删除内核参数配置"
     fi
     
-    # 询问是否删除配置	
+    # 询问是否删除配置    
     echo ""
     if [[ -d "$CONFIG_DIR" ]]; then
         if confirm "是否删除配置文件目录 ${CONFIG_DIR}?"; then
@@ -1384,7 +1605,9 @@ do_uninstall() {
     echo ""
     log_info "卸载完成！"
 }
+
 # ==================== 状态查看 ====================
+
 show_status() {
     print_mini_banner
     
@@ -1470,7 +1693,7 @@ show_status() {
         echo "  服务端配置: ${CONFIG_DIR}/server.yaml"
         
         # 提取配置信息
-        local listen port ws_path
+        local listen ws_path
         listen=$(grep -E '^\s*listen:' "${CONFIG_DIR}/server.yaml" 2>/dev/null | awk '{print $2}' | tr -d '"')
         ws_path=$(grep -E '^\s*ws_path:' "${CONFIG_DIR}/server.yaml" 2>/dev/null | awk '{print $2}' | tr -d '"')
         echo "    监听地址: ${listen:-未配置}"
@@ -1508,13 +1731,17 @@ show_status() {
         echo ""
     fi
 }
+
 # ==================== 帮助信息 ====================
+
 show_help() {
     print_banner
     
     cat << EOF
+
 ${GREEN}用法:${NC}
   $0 [命令] [选项]
+
 ${GREEN}命令:${NC}
   server      安装服务端
   client      安装客户端
@@ -1522,38 +1749,57 @@ ${GREEN}命令:${NC}
   uninstall   卸载 Phantom-X
   status      查看安装状态
   help        显示此帮助
+
 ${GREEN}选项:${NC}
   --force          强制覆盖安装
   --skip-service   跳过服务创建
   --port PORT      指定服务端口 (仅服务端)
   --token TOKEN    指定认证令牌 (仅服务端)
+  --version VER    指定安装版本 (如 2.0.0)
+
 ${GREEN}示例:${NC}
   # 安装服务端
   $0 server
+
   # 安装客户端
   $0 client
+
   # 强制重新安装服务端
   $0 server --force
+
   # 指定端口和令牌
   $0 server --port 8443 --token mytoken123
+
+  # 安装指定版本
+  $0 server --version 2.0.0
+
   # 查看状态
   $0 status
+
   # 更新
   $0 update
+
 ${GREEN}快速安装:${NC}
   # 一键安装服务端
   curl -fsSL ${GITHUB_RAW_URL}/scripts/install.sh | bash -s server
+
   # 一键安装客户端
   curl -fsSL ${GITHUB_RAW_URL}/scripts/install.sh | bash -s client
+
 ${GREEN}环境变量:${NC}
   DEBUG=1           启用调试输出
+
 ${GREEN}项目地址:${NC}
   https://github.com/${GITHUB_REPO}
+
 ${GREEN}问题反馈:${NC}
   https://github.com/${GITHUB_REPO}/issues
+
 EOF
 }
+
 # ==================== 参数解析 ====================
+
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -1577,6 +1823,10 @@ parse_args() {
                 CUSTOM_TOKEN="$2"
                 shift 2
                 ;;
+            --version)
+                CUSTOM_VERSION="${2#v}"
+                shift 2
+                ;;
             --debug)
                 export DEBUG=1
                 shift
@@ -1585,7 +1835,7 @@ parse_args() {
                 INSTALL_MODE="help"
                 shift
                 ;;
-            -v|--version)
+            -v)
                 echo "Phantom-X Installer v${SCRIPT_VERSION}"
                 exit 0
                 ;;
@@ -1595,7 +1845,9 @@ parse_args() {
         esac
     done
 }
+
 # ==================== 主入口 ====================
+
 main() {
     # 解析参数
     parse_args "$@"
@@ -1631,15 +1883,6 @@ main() {
             ;;
     esac
 }
+
 # 运行主程序
 main "$@"
-
-
-
-
-
-
-
-
-
-
