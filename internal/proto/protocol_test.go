@@ -1,6 +1,3 @@
-
-//internal/proto/protocol_test.go
-
 package proto
 
 import (
@@ -106,7 +103,7 @@ func TestRemovePaddingInvalid(t *testing.T) {
 
 	for _, tc := range testCases {
 		result := RemovePadding(tc.payload)
-		_ = result
+		_ = result // 避免 unused 警告
 	}
 }
 
@@ -232,7 +229,9 @@ func BenchmarkRemovePadding(b *testing.B) {
 	calc := NewPaddingCalculator(DefaultPaddingConfig())
 	buf := make([]byte, 2048)
 	original := make([]byte, 1024)
-	n := PackFrameWithPadding(buf, CmdData, 1, 0, original, calc)
+	
+	// 修复：使用 _ 忽略返回值，避免 "declared and not used" 错误
+	_ = PackFrameWithPadding(buf, CmdData, 1, 0, original, calc)
 
 	_, _, _, length := UnpackHeader(buf[:HeaderLen])
 	payload := buf[HeaderLen : HeaderLen+length]
@@ -273,6 +272,3 @@ func BenchmarkAggregatedDataDecode(b *testing.B) {
 		_, _ = DecodeAggregatedData(encoded)
 	}
 }
-
-
-
