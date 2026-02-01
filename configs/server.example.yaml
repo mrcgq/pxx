@@ -1,0 +1,30 @@
+
+
+//configs/server.example.yaml
+
+
+# Phantom-X 服务端配置
+
+# 监听地址
+listen: ":443"
+
+# TLS 证书
+cert: "/etc/phantom-x/cert.pem"
+key: "/etc/phantom-x/key.pem"
+
+# 认证令牌 (留空则不验证)
+token: "your-secret-token-here"
+
+# WebSocket 路径 (建议修改默认值以提高隐蔽性)
+ws_path: "/ws"
+
+# 性能调优
+max_streams_per_conn: 1000
+read_timeout: 60s
+write_timeout: 10s
+idle_timeout: 120s
+
+# 日志级别: debug, info, warn, error
+log_level: "info"
+
+
