@@ -238,7 +238,7 @@ func BenchmarkRemovePadding(b *testing.B) {
 	calc := NewPaddingCalculator(DefaultPaddingConfig())
 	buf := make([]byte, 2048)
 	original := make([]byte, 1024)
-	n := PackFrameWithPadding(buf, CmdData, 1, 0, original, calc)
+	_ = PackFrameWithPadding(buf, CmdData, 1, 0, original, calc) 
 
 	// 提取 payload 部分
 	_, _, _, length := UnpackHeader(buf[:HeaderLen])
