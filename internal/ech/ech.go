@@ -1,6 +1,3 @@
-
-//internal/ech/ech.go
-
 package ech
 
 import (
@@ -85,9 +82,7 @@ func StartAutoRefresh(stopCh <-chan struct{}) {
 			case <-stopCh:
 				return
 			case <-ticker.C:
-				if err := refreshECH(); err != nil {
-					// 刷新失败时保留旧配置
-				}
+				_ = refreshECH()
 			}
 		}
 	}()
@@ -122,11 +117,16 @@ func BuildTLSConfig(serverName string, insecure bool) (*tls.Config, error) {
 	roots, _ := x509.SystemCertPool()
 
 	return &tls.Config{
-    MinVersion:         tls.VersionTLS13,
-    ServerName:         serverName,
-    RootCAs:            roots,
-    InsecureSkipVerify: insecure,
-}, nil
+		MinVersion:                     tls.VersionTLS13,
+		ServerName:                     serverName,
+		EncryptedClientHelloConfigList: ech,
+		EncryptedClientHelloRejectionVerify: func(cs tls.ConnectionState) error {
+			return errors.New("ECH rejected")
+		},
+		RootCAs:            roots,
+		InsecureSkipVerify: insecure,
+	}, nil
+}
 
 func queryHTTPSRecord(domain, dnsServer string) (string, error) {
 	if strings.HasPrefix(dnsServer, "http://") || strings.HasPrefix(dnsServer, "https://") {
@@ -145,7 +145,10 @@ func queryDNSUDP(domain, dnsServer string) (string, error) {
 		return "", err
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(3 * time.Second))
+
+	if err := conn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		return "", err
+	}
 
 	if _, err := conn.Write(query); err != nil {
 		return "", fmt.Errorf("write DNS query: %w", err)
@@ -160,13 +163,19 @@ func queryDNSUDP(domain, dnsServer string) (string, error) {
 }
 
 func queryDoH(domain, dohURL string) (string, error) {
-	u, _ := url.Parse(dohURL)
+	u, err := url.Parse(dohURL)
+	if err != nil {
+		return "", err
+	}
 	q := u.Query()
 	dnsQuery := buildDNSQuery(domain, typeHTTPS)
 	q.Set("dns", base64.RawURLEncoding.EncodeToString(dnsQuery))
 	u.RawQuery = q.Encode()
 
-	req, _ := http.NewRequest("GET", u.String(), nil)
+	req, err := http.NewRequest("GET", u.String(), nil)
+	if err != nil {
+		return "", err
+	}
 	req.Header.Set("Accept", "application/dns-message")
 
 	client := &http.Client{Timeout: 5 * time.Second}
@@ -176,7 +185,10 @@ func queryDoH(domain, dohURL string) (string, error) {
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
 	return parseDNSResponse(body)
 }
 
@@ -268,6 +280,3 @@ func parseHTTPSRecord(data []byte) string {
 	}
 	return ""
 }
-
-
-
