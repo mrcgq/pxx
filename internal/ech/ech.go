@@ -1,3 +1,5 @@
+//internal/ech/ech.go
+
 package ech
 
 import (
@@ -117,12 +119,8 @@ func BuildTLSConfig(serverName string, insecure bool) (*tls.Config, error) {
 	roots, _ := x509.SystemCertPool()
 
 	return &tls.Config{
-		MinVersion:                     tls.VersionTLS13,
-		ServerName:                     serverName,
-		EncryptedClientHelloConfigList: ech,
-		EncryptedClientHelloRejectionVerify: func(cs tls.ConnectionState) error {
-			return errors.New("ECH rejected")
-		},
+		MinVersion:         tls.VersionTLS13,
+		ServerName:         serverName,
 		RootCAs:            roots,
 		InsecureSkipVerify: insecure,
 	}, nil
@@ -280,3 +278,8 @@ func parseHTTPSRecord(data []byte) string {
 	}
 	return ""
 }
+
+
+
+
+
