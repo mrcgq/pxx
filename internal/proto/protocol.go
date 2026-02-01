@@ -1,7 +1,6 @@
 
 
 //internal/proto/protocol.go
-
 package proto
 
 import (
@@ -11,7 +10,6 @@ import (
 	"fmt"
 	mrand "math/rand"
 	"net"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -24,8 +22,8 @@ const (
 	HeaderLen   = 8
 	MaxPayload  = 65535
 	MaxInitData = 4096
-	MaxPadding  = 512
-	MaxHostLen  = 253 // DNS 规范最大域名长度
+	MaxPadding  = 255
+	MaxHostLen  = 253
 )
 
 // 命令类型
@@ -118,9 +116,6 @@ func PackFrameAlloc(cmd byte, streamID uint32, payload []byte) []byte {
 // ==================== 地址格式化（IPv6 安全）====================
 
 // FormatHostPort 正确格式化主机和端口，支持 IPv6
-// IPv4: 192.168.1.1:443
-// IPv6: [::1]:443
-// 域名: example.com:443
 func FormatHostPort(host string, port uint16) string {
 	return net.JoinHostPort(host, strconv.Itoa(int(port)))
 }
@@ -141,12 +136,9 @@ func ParseHostPort(hostport string) (host string, port uint16, err error) {
 }
 
 // FormatAddress 格式化地址用于拨号
-// 确保 IPv6 地址被正确包裹在方括号中
 func FormatAddress(host string, port uint16) string {
-	// 检查是否是 IPv6 地址
 	ip := net.ParseIP(host)
 	if ip != nil && ip.To4() == nil {
-		// IPv6 地址需要用方括号包裹
 		return fmt.Sprintf("[%s]:%d", host, port)
 	}
 	return fmt.Sprintf("%s:%d", host, port)
@@ -154,66 +146,47 @@ func FormatAddress(host string, port uint16) string {
 
 // ==================== Host 验证 ====================
 
-// 危险字符正则表达式
-var (
-	// 匹配可能导致注入的字符
-	dangerousCharsRegex = regexp.MustCompile(`[\x00-\x1f\x7f<>\"'` + "`" + `\\\$\{\}\|\&\;\(\)\[\]]`)
-
-	// 有效域名标签正则
-	validLabelRegex = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?$`)
-
-	// 有效 IPv4 地址
-	ipv4Regex = regexp.MustCompile(`^(\d{1,3}\.){3}\d{1,3}$`)
-)
-
 // ValidateHost 严格验证 Host 地址
-// 返回 nil 表示验证通过
 func ValidateHost(host string) error {
-	// 检查空值
 	if len(host) == 0 {
 		return ErrEmptyHost
 	}
 
-	// 检查长度
 	if len(host) > MaxHostLen {
 		return ErrHostTooLong
 	}
 
-	// 去除首尾空白
 	host = strings.TrimSpace(host)
 	if len(host) == 0 {
 		return ErrEmptyHost
 	}
 
-	// 检查危险字符（可能导致注入攻击）
-	if dangerousCharsRegex.MatchString(host) {
-		return fmt.Errorf("%w: contains dangerous characters", ErrInvalidHost)
+	// 检查危险字符
+	for _, r := range host {
+		if r < 0x20 || r == 0x7f || strings.ContainsRune("<>\"'`\\${}|&;()[]", r) {
+			return fmt.Errorf("%w: contains dangerous characters", ErrInvalidHost)
+		}
 	}
 
-	// 检查是否包含空白字符
+	// 检查空白字符
 	for _, r := range host {
 		if unicode.IsSpace(r) {
 			return fmt.Errorf("%w: contains whitespace", ErrInvalidHost)
 		}
 	}
 
-	// 检查是否以点开头或结尾
 	if strings.HasPrefix(host, ".") || strings.HasSuffix(host, ".") {
 		return fmt.Errorf("%w: invalid dot placement", ErrInvalidHost)
 	}
 
-	// 检查连续的点
 	if strings.Contains(host, "..") {
 		return fmt.Errorf("%w: consecutive dots", ErrInvalidHost)
 	}
 
-	// 尝试解析为 IP 地址
 	if ip := net.ParseIP(host); ip != nil {
-		// 有效的 IPv4 或 IPv6 地址
 		return nil
 	}
 
-	// 检查是否是带方括号的 IPv6
 	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
 		ipStr := host[1 : len(host)-1]
 		if ip := net.ParseIP(ipStr); ip != nil {
@@ -222,13 +195,11 @@ func ValidateHost(host string) error {
 		return fmt.Errorf("%w: invalid bracketed IPv6", ErrInvalidHost)
 	}
 
-	// 验证为域名
 	return validateDomain(host)
 }
 
 // validateDomain 验证域名格式
 func validateDomain(domain string) error {
-	// 分割标签
 	labels := strings.Split(domain, ".")
 
 	if len(labels) < 1 {
@@ -244,10 +215,7 @@ func validateDomain(domain string) error {
 			return fmt.Errorf("%w: label too long", ErrInvalidHost)
 		}
 
-		// 检查标签格式
-		// 允许数字开头（如 3com.com）但最后一个标签（TLD）不能全是数字
 		if i == len(labels)-1 {
-			// TLD 不能全是数字
 			allDigits := true
 			for _, r := range label {
 				if !unicode.IsDigit(r) {
@@ -260,12 +228,10 @@ func validateDomain(domain string) error {
 			}
 		}
 
-		// 标签只能包含字母、数字和连字符
 		for j, r := range label {
 			if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '-' && r != '_' {
 				return fmt.Errorf("%w: invalid character in label", ErrInvalidHost)
 			}
-			// 连字符不能在开头或结尾
 			if r == '-' && (j == 0 || j == len(label)-1) {
 				return fmt.Errorf("%w: hyphen at label boundary", ErrInvalidHost)
 			}
@@ -281,7 +247,6 @@ func ValidateHostStrict(host string) error {
 		return err
 	}
 
-	// 额外检查：禁止本地地址
 	if isLocalAddress(host) {
 		return fmt.Errorf("%w: local addresses not allowed", ErrInvalidHost)
 	}
@@ -291,29 +256,24 @@ func ValidateHostStrict(host string) error {
 
 // isLocalAddress 检查是否是本地/保留地址
 func isLocalAddress(host string) bool {
-	// 检查常见的本地主机名
 	lower := strings.ToLower(host)
 	if lower == "localhost" || lower == "localhost.localdomain" {
 		return true
 	}
 
-	// 检查 IP 地址
 	ip := net.ParseIP(host)
 	if ip == nil {
 		return false
 	}
 
-	// 检查是否是回环地址
 	if ip.IsLoopback() {
 		return true
 	}
 
-	// 检查是否是私有地址
 	if ip.IsPrivate() {
 		return true
 	}
 
-	// 检查是否是链路本地地址
 	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
 		return true
 	}
@@ -323,16 +283,12 @@ func isLocalAddress(host string) bool {
 
 // SanitizeHost 清理并验证 Host，返回安全的版本
 func SanitizeHost(host string) (string, error) {
-	// 去除首尾空白
 	host = strings.TrimSpace(host)
 
-	// 转换为小写（域名不区分大小写）
-	// 注意：不对 IP 地址进行小写转换
 	if net.ParseIP(host) == nil {
 		host = strings.ToLower(host)
 	}
 
-	// 验证
 	if err := ValidateHost(host); err != nil {
 		return "", err
 	}
@@ -354,7 +310,7 @@ func DefaultPaddingConfig() *PaddingConfig {
 	return &PaddingConfig{
 		Enabled:       true,
 		MinSize:       64,
-		MaxPadding:    256,
+		MaxPadding:    255,
 		Distribution:  "mimicry",
 		MimicryTarget: "https",
 	}
@@ -389,45 +345,69 @@ func (p *PaddingCalculator) CalculatePadding(currentSize int) int {
 		return 0
 	}
 
+	var padding int
 	switch p.cfg.Distribution {
 	case "uniform":
-		return p.uniformPadding(currentSize)
+		padding = p.uniformPadding(currentSize)
 	case "normal":
-		return p.normalPadding(currentSize)
+		padding = p.normalPadding(currentSize)
 	case "mimicry":
-		return p.mimicryPadding(currentSize)
+		padding = p.mimicryPadding(currentSize)
 	default:
-		return p.uniformPadding(currentSize)
+		padding = p.uniformPadding(currentSize)
 	}
+
+	if padding > MaxPadding {
+		padding = MaxPadding
+	}
+	return padding
 }
 
 func (p *PaddingCalculator) uniformPadding(currentSize int) int {
+	maxPad := p.cfg.MaxPadding
+	if maxPad > MaxPadding {
+		maxPad = MaxPadding
+	}
 	if currentSize >= p.cfg.MinSize {
-		return p.rng.Intn(p.cfg.MaxPadding / 4)
+		if maxPad/4 <= 0 {
+			return 0
+		}
+		return p.rng.Intn(maxPad / 4)
 	}
 	base := p.cfg.MinSize - currentSize
-	extra := p.rng.Intn(p.cfg.MaxPadding / 2)
+	extra := 0
+	if maxPad/2 > 0 {
+		extra = p.rng.Intn(maxPad / 2)
+	}
 	padding := base + extra
-	if padding > p.cfg.MaxPadding {
-		padding = p.cfg.MaxPadding
+	if padding > maxPad {
+		padding = maxPad
 	}
 	return padding
 }
 
 func (p *PaddingCalculator) normalPadding(currentSize int) int {
-	mean := float64(p.cfg.MaxPadding) / 2
-	std := float64(p.cfg.MaxPadding) / 4
+	maxPad := p.cfg.MaxPadding
+	if maxPad > MaxPadding {
+		maxPad = MaxPadding
+	}
+	mean := float64(maxPad) / 2
+	std := float64(maxPad) / 4
 	padding := int(p.rng.NormFloat64()*std + mean)
 	if padding < 0 {
 		padding = 0
 	}
-	if padding > p.cfg.MaxPadding {
-		padding = p.cfg.MaxPadding
+	if padding > maxPad {
+		padding = maxPad
 	}
 	return padding
 }
 
 func (p *PaddingCalculator) mimicryPadding(currentSize int) int {
+	maxPad := p.cfg.MaxPadding
+	if maxPad > MaxPadding {
+		maxPad = MaxPadding
+	}
 	var targetSize int
 	if p.rng.Float64() < p.httpsSmallPktProb {
 		targetSize = int(p.rng.NormFloat64()*p.httpsSmallPktStd + p.httpsSmallPktMean)
@@ -444,8 +424,8 @@ func (p *PaddingCalculator) mimicryPadding(currentSize int) int {
 	if padding < 0 {
 		padding = 0
 	}
-	if padding > p.cfg.MaxPadding {
-		padding = p.cfg.MaxPadding
+	if padding > maxPad {
+		padding = maxPad
 	}
 	return padding
 }
@@ -453,8 +433,6 @@ func (p *PaddingCalculator) mimicryPadding(currentSize int) int {
 // ==================== 带 Padding 的编解码 ====================
 
 // PackFrameWithPadding 编码帧并添加填充
-// 格式: [Header][Payload][Padding][PaddingLen]
-// PaddingLen 放在最后一个字节，便于解析
 func PackFrameWithPadding(buf []byte, cmd byte, streamID uint32, flags byte, payload []byte, paddingCalc *PaddingCalculator) int {
 	currentSize := HeaderLen + len(payload)
 	paddingLen := 0
@@ -463,32 +441,30 @@ func PackFrameWithPadding(buf []byte, cmd byte, streamID uint32, flags byte, pay
 		paddingLen = paddingCalc.CalculatePadding(currentSize)
 	}
 
-	// 只有在真正添加 padding 时才设置标志位
+	if paddingLen > MaxPadding {
+		paddingLen = MaxPadding
+	}
+
 	if paddingLen > 0 {
 		flags |= FlagPadding
 	}
 
-	// 计算总 payload 长度
 	totalPayloadLen := len(payload)
 	if paddingLen > 0 {
-		totalPayloadLen += paddingLen + 1 // padding 内容 + paddingLen 字节
+		totalPayloadLen += paddingLen + 1
 	}
 
 	PackHeader(buf, cmd, streamID, flags, totalPayloadLen)
 	offset := HeaderLen
 
-	// 写入原始 payload
 	if len(payload) > 0 {
 		copy(buf[offset:], payload)
 		offset += len(payload)
 	}
 
-	// 写入 padding（只有 paddingLen > 0 时才写入）
 	if paddingLen > 0 {
-		// 先写 padding 内容
 		generatePadding(buf[offset:offset+paddingLen], paddingLen)
 		offset += paddingLen
-		// 最后写 paddingLen（1字节）
 		buf[offset] = byte(paddingLen)
 		offset++
 	}
@@ -502,16 +478,13 @@ func generatePadding(buf []byte, length int) {
 		return
 	}
 
-	// 模拟 HTTP/TLS 流量特征的字符集
 	httpChars := []byte("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.~:/?#[]@!$&'()*+,;= \r\n")
 
-	// 前半部分用随机二进制数据
 	halfLen := length / 2
 	if halfLen > 0 {
-		rand.Read(buf[:halfLen])
+		_, _ = rand.Read(buf[:halfLen])
 	}
 
-	// 后半部分用类 HTTP 字符（增加混淆效果）
 	for i := halfLen; i < length; i++ {
 		buf[i] = httpChars[mrand.Intn(len(httpChars))]
 	}
@@ -522,27 +495,20 @@ func RemovePadding(payload []byte) []byte {
 		return payload
 	}
 
-	// paddingLen 在最后一个字节
 	paddingLen := int(payload[len(payload)-1])
 
-	// paddingLen == 0 是异常情况
-	// 正常流程中只有 paddingLen > 0 才会设置 FlagPadding
-	// 如果收到这种数据，可能是攻击或数据损坏，返回原数据不做修改
 	if paddingLen == 0 {
-		return payload  // ✅ 不修改，返回原数据
+		return payload
 	}
 
-	// 验证 paddingLen 合理性
 	if paddingLen > MaxPadding {
 		return payload
 	}
 
-	// 检查长度是否足够：需要至少 paddingLen + 1（paddingLen字节本身）
 	if paddingLen+1 > len(payload) {
 		return payload
 	}
 
-	// 计算真实 payload 结束位置
 	realEnd := len(payload) - 1 - paddingLen
 	if realEnd < 0 {
 		return payload
@@ -565,7 +531,6 @@ func UnpackFrameWithPadding(data []byte) (cmd byte, streamID uint32, flags byte,
 
 	rawPayload := data[HeaderLen : HeaderLen+length]
 
-	// 只有设置了 FlagPadding 才尝试移除 padding
 	if flags&FlagPadding != 0 && len(rawPayload) > 0 {
 		payload = RemovePadding(rawPayload)
 	} else {
@@ -610,7 +575,6 @@ func ParseOpenPayload(payload []byte) (ipStrategy byte, host string, port uint16
 
 	host = string(payload[2 : 2+hostLen])
 
-	// 验证 host 格式
 	if err = ValidateHost(host); err != nil {
 		return
 	}
@@ -647,7 +611,6 @@ func (a *AggregatedData) Encode() []byte {
 
 // Reset 重置聚合数据，保留底层容量
 func (a *AggregatedData) Reset() {
-	// 清除对数据的引用，避免内存泄漏
 	for i := range a.Items {
 		a.Items[i].StreamID = 0
 		a.Items[i].Data = nil
@@ -677,6 +640,7 @@ func DecodeAggregatedData(data []byte) (*AggregatedData, error) {
 	}
 	return agg, nil
 }
+
 
 
 
