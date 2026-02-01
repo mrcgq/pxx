@@ -1,4 +1,6 @@
 
+
+
 //internal/server/session.go
 
 package server
@@ -33,21 +35,19 @@ const (
 	DefaultWriteTimeout        = 10 * time.Second
 	DefaultReadTimeout         = 60 * time.Second
 	DefaultPingInterval        = 30 * time.Second
-	DefaultMaxRetries          = 3
-	DefaultRetryDelay          = 100 * time.Millisecond
 	GracefulShutdownTimeout    = 30 * time.Second
 )
 
 // ==================== 错误定义 ====================
 
 var (
-	ErrSessionClosed   = errors.New("session closed")
-	ErrStreamLimitHit  = errors.New("stream limit exceeded")
-	ErrWriteQueueFull  = errors.New("write queue full")
-	ErrSendTimeout     = errors.New("send timeout")
-	ErrInvalidPayload  = errors.New("invalid payload")
-	ErrDialFailed      = errors.New("dial failed")
-	ErrInvalidHost     = errors.New("invalid host")
+	ErrSessionClosed  = errors.New("session closed")
+	ErrStreamLimitHit = errors.New("stream limit exceeded")
+	ErrWriteQueueFull = errors.New("write queue full")
+	ErrSendTimeout    = errors.New("send timeout")
+	ErrInvalidPayload = errors.New("invalid payload")
+	ErrDialFailed     = errors.New("dial failed")
+	ErrInvalidHost    = errors.New("invalid host")
 )
 
 // ==================== 会话统计 ====================
@@ -77,11 +77,8 @@ type SessionConfig struct {
 	TCPReadTimeout    time.Duration
 	UDPReadTimeout    time.Duration
 	PingInterval      time.Duration
-	MaxRetries        int
-	RetryDelay        time.Duration
 }
 
-// DefaultSessionConfig 返回默认配置
 func DefaultSessionConfig() *SessionConfig {
 	return &SessionConfig{
 		MaxStreamsPerConn: DefaultMaxStreamsPerClient,
@@ -92,14 +89,11 @@ func DefaultSessionConfig() *SessionConfig {
 		TCPReadTimeout:    DefaultTCPReadTimeout,
 		UDPReadTimeout:    DefaultUDPReadTimeout,
 		PingInterval:      DefaultPingInterval,
-		MaxRetries:        DefaultMaxRetries,
-		RetryDelay:        DefaultRetryDelay,
 	}
 }
 
 // ==================== 会话定义 ====================
 
-// Session 处理单个客户端连接
 type Session struct {
 	id        string
 	conn      *transport.WSConn
@@ -108,16 +102,14 @@ type Session struct {
 	sessCfg   *SessionConfig
 	writeCh   chan transport.WriteJob
 
-	// 生命周期控制
 	ctx        context.Context
 	cancel     context.CancelFunc
 	stopOnce   sync.Once
 	stopped    int32
 	wg         sync.WaitGroup
 	startTime  time.Time
-	lastActive int64 // Unix timestamp，原子操作
+	lastActive int64
 
-	// 统计信息
 	streamCount    int32
 	streamsCreated int64
 	streamsClosed  int64
@@ -128,19 +120,16 @@ type Session struct {
 	errorCount     int64
 }
 
-// NewSession 创建新会话
 func NewSession(id string, conn *websocket.Conn, mgr *stream.Manager, cfg *config.ServerConfig) *Session {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	sessCfg := DefaultSessionConfig()
 
-	// 从服务端配置覆盖
 	if cfg.MaxStreamsPerConn > 0 {
 		sessCfg.MaxStreamsPerConn = cfg.MaxStreamsPerConn
 	}
 	if cfg.WriteTimeout > 0 {
 		sessCfg.WriteTimeout = cfg.WriteTimeout
-		// 发送超时使用写超时的一半
 		sessCfg.SendTimeout = cfg.WriteTimeout / 2
 		if sessCfg.SendTimeout < 100*time.Millisecond {
 			sessCfg.SendTimeout = 100 * time.Millisecond
@@ -166,17 +155,14 @@ func NewSession(id string, conn *websocket.Conn, mgr *stream.Manager, cfg *confi
 	}
 }
 
-// ID 返回会话 ID
 func (s *Session) ID() string {
 	return s.id
 }
 
-// IsStopped 检查会话是否已停止
 func (s *Session) IsStopped() bool {
 	return atomic.LoadInt32(&s.stopped) == 1
 }
 
-// Stop 停止会话
 func (s *Session) Stop() {
 	s.stopOnce.Do(func() {
 		atomic.StoreInt32(&s.stopped, 1)
@@ -184,12 +170,10 @@ func (s *Session) Stop() {
 	})
 }
 
-// updateLastActive 更新最后活动时间
 func (s *Session) updateLastActive() {
 	atomic.StoreInt64(&s.lastActive, time.Now().Unix())
 }
 
-// GetStats 获取会话统计信息
 func (s *Session) GetStats() SessionStats {
 	return SessionStats{
 		StreamsCreated:   atomic.LoadInt64(&s.streamsCreated),
@@ -206,26 +190,21 @@ func (s *Session) GetStats() SessionStats {
 	}
 }
 
-// Serve 主服务循环
 func (s *Session) Serve() {
 	defer s.cleanup()
 
-	// 启动写循环
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
 		s.writeLoop()
 	}()
 
-	// 读循环（阻塞）
 	s.readLoop()
 }
 
-// cleanup 清理资源
 func (s *Session) cleanup() {
 	s.Stop()
 
-	// 等待所有 goroutine 完成（带超时）
 	done := make(chan struct{})
 	go func() {
 		s.wg.Wait()
@@ -239,13 +218,8 @@ func (s *Session) cleanup() {
 		plog.Warn("[Session] %s graceful shutdown timeout", s.id)
 	}
 
-	// 关闭所有流
 	s.streamMgr.CloseAll()
-
-	// 关闭连接
 	s.conn.Close()
-
-	// 排空写队列
 	s.drainWriteChannel()
 
 	plog.Info("[Session] %s closed, stats: created=%d, closed=%d, current=%d",
@@ -255,7 +229,6 @@ func (s *Session) cleanup() {
 		atomic.LoadInt32(&s.streamCount))
 }
 
-// drainWriteChannel 排空写队列
 func (s *Session) drainWriteChannel() {
 	for {
 		select {
@@ -275,7 +248,6 @@ func (s *Session) drainWriteChannel() {
 	}
 }
 
-// writeLoop 写循环
 func (s *Session) writeLoop() {
 	ticker := time.NewTicker(s.sessCfg.PingInterval)
 	defer ticker.Stop()
@@ -324,7 +296,6 @@ func (s *Session) writeLoop() {
 	}
 }
 
-// handleWriteError 处理写错误
 func (s *Session) handleWriteError(job transport.WriteJob, err error) {
 	atomic.AddInt64(&s.errorCount, 1)
 	if job.Done != nil {
@@ -335,7 +306,6 @@ func (s *Session) handleWriteError(job transport.WriteJob, err error) {
 	}
 }
 
-// readLoop 读循环
 func (s *Session) readLoop() {
 	s.conn.SetPongHandler(func(string) error {
 		s.updateLastActive()
@@ -375,7 +345,6 @@ func (s *Session) readLoop() {
 	}
 }
 
-// handleFrame 处理帧
 func (s *Session) handleFrame(data []byte) {
 	cmd, streamID, flags, payload, err := proto.UnpackFrameWithPadding(data)
 	if err != nil {
@@ -384,7 +353,6 @@ func (s *Session) handleFrame(data []byte) {
 		return
 	}
 
-	// 处理聚合包
 	if cmd == proto.CmdData && flags&proto.FlagAggregate != 0 {
 		agg, err := proto.DecodeAggregatedData(payload)
 		if err != nil {
@@ -420,9 +388,7 @@ func (s *Session) handleFrame(data []byte) {
 	}
 }
 
-// handleTCPOpen 处理 TCP 打开请求
 func (s *Session) handleTCPOpen(streamID uint32, payload []byte) {
-	// 先增加计数，如果超限则回滚
 	newCount := atomic.AddInt32(&s.streamCount, 1)
 	maxStreams := int32(s.sessCfg.MaxStreamsPerConn)
 
@@ -434,7 +400,6 @@ func (s *Session) handleTCPOpen(streamID uint32, payload []byte) {
 		return
 	}
 
-	// 解析 payload
 	ipStrategy, host, port, initData, err := proto.ParseOpenPayload(payload)
 	if err != nil {
 		atomic.AddInt32(&s.streamCount, -1)
@@ -444,7 +409,6 @@ func (s *Session) handleTCPOpen(streamID uint32, payload []byte) {
 		return
 	}
 
-	// 验证并清理 host
 	host, err = proto.SanitizeHost(host)
 	if err != nil {
 		atomic.AddInt32(&s.streamCount, -1)
@@ -454,11 +418,9 @@ func (s *Session) handleTCPOpen(streamID uint32, payload []byte) {
 		return
 	}
 
-	// 使用正确的 IPv6 格式化
 	target := proto.FormatHostPort(host, port)
 	dialTarget := s.resolveWithStrategy(host, port, ipStrategy)
 
-	// 建立连接
 	conn, err := net.DialTimeout("tcp", dialTarget, 10*time.Second)
 	if err != nil {
 		atomic.AddInt32(&s.streamCount, -1)
@@ -467,14 +429,12 @@ func (s *Session) handleTCPOpen(streamID uint32, payload []byte) {
 		return
 	}
 
-	// 创建流
 	st := stream.NewStream(streamID, target, false)
 	st.TCPConn = conn
 	st.SetState(stream.StateConnected)
 	st.OnClose = func(id uint32) {
 		atomic.AddInt32(&s.streamCount, -1)
 		atomic.AddInt64(&s.streamsClosed, 1)
-		// 只有在会话未停止时才发送关闭帧
 		if !s.IsStopped() {
 			s.send(proto.CmdClose, id, nil)
 		}
@@ -482,25 +442,25 @@ func (s *Session) handleTCPOpen(streamID uint32, payload []byte) {
 	s.streamMgr.Register(st)
 	atomic.AddInt64(&s.streamsCreated, 1)
 
-	// 0-RTT: 发送 InitData
 	if len(initData) > 0 {
-		conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+			plog.Debug("[Session] %s SetWriteDeadline failed: %v", s.id, err)
+			s.streamMgr.Unregister(st.ID)
+			return
+		}
 		if _, err := conn.Write(initData); err != nil {
 			plog.Debug("[Session] %s InitData write failed: %v", s.id, err)
 			s.streamMgr.Unregister(st.ID)
 			return
 		}
-		conn.SetWriteDeadline(time.Time{})
+		_ = conn.SetWriteDeadline(time.Time{})
 	}
 
-	// 发送成功响应
 	s.send(proto.CmdConnStatus, streamID, []byte{proto.StatusOK})
 
-	// 日志脱敏：非 debug 级别下隐藏敏感信息
 	logTarget := sanitizeTarget(target, isDebugLevel())
 	plog.Info("[Session] %s TCP stream %d -> %s (init: %d bytes)", s.id, streamID, logTarget, len(initData))
 
-	// 启动读循环
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
@@ -508,9 +468,7 @@ func (s *Session) handleTCPOpen(streamID uint32, payload []byte) {
 	}()
 }
 
-// handleUDPOpen 处理 UDP 打开请求
 func (s *Session) handleUDPOpen(streamID uint32, payload []byte) {
-	// 先增加计数，如果超限则回滚
 	newCount := atomic.AddInt32(&s.streamCount, 1)
 	maxStreams := int32(s.sessCfg.MaxStreamsPerConn)
 
@@ -520,7 +478,6 @@ func (s *Session) handleUDPOpen(streamID uint32, payload []byte) {
 		return
 	}
 
-	// 解析 payload
 	ipStrategy, host, port, _, err := proto.ParseOpenPayload(payload)
 	if err != nil {
 		atomic.AddInt32(&s.streamCount, -1)
@@ -529,7 +486,6 @@ func (s *Session) handleUDPOpen(streamID uint32, payload []byte) {
 		return
 	}
 
-	// 验证并清理 host
 	host, err = proto.SanitizeHost(host)
 	if err != nil {
 		atomic.AddInt32(&s.streamCount, -1)
@@ -538,10 +494,8 @@ func (s *Session) handleUDPOpen(streamID uint32, payload []byte) {
 		return
 	}
 
-	// 使用正确的 IPv6 格式化
 	target := proto.FormatHostPort(host, port)
 
-	// 创建 UDP 连接
 	udpConn, err := net.ListenUDP("udp", nil)
 	if err != nil {
 		atomic.AddInt32(&s.streamCount, -1)
@@ -549,12 +503,11 @@ func (s *Session) handleUDPOpen(streamID uint32, payload []byte) {
 		return
 	}
 
-	// 解析目标地址
 	targetIP := net.ParseIP(host)
 	if targetIP == nil {
 		ips, err := net.LookupIP(host)
 		if err != nil || len(ips) == 0 {
-			udpConn.Close()
+			_ = udpConn.Close()
 			atomic.AddInt32(&s.streamCount, -1)
 			s.send(proto.CmdConnStatus, streamID, []byte{proto.StatusFail})
 			return
@@ -564,7 +517,6 @@ func (s *Session) handleUDPOpen(streamID uint32, payload []byte) {
 
 	udpAddr := &net.UDPAddr{IP: targetIP, Port: int(port)}
 
-	// 创建流
 	st := stream.NewStream(streamID, target, true)
 	st.UDPConn = udpConn
 	st.UDPAddr = udpAddr
@@ -579,14 +531,11 @@ func (s *Session) handleUDPOpen(streamID uint32, payload []byte) {
 	s.streamMgr.Register(st)
 	atomic.AddInt64(&s.streamsCreated, 1)
 
-	// 发送成功响应
 	s.send(proto.CmdConnStatus, streamID, []byte{proto.StatusOK})
 
-	// 日志脱敏
 	logTarget := sanitizeTarget(target, isDebugLevel())
 	plog.Info("[Session] %s UDP stream %d -> %s", s.id, streamID, logTarget)
 
-	// 启动读循环
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
@@ -594,7 +543,6 @@ func (s *Session) handleUDPOpen(streamID uint32, payload []byte) {
 	}()
 }
 
-// handleData 处理数据帧
 func (s *Session) handleData(streamID uint32, payload []byte) {
 	st := s.streamMgr.Get(streamID)
 	if st == nil {
@@ -606,12 +554,10 @@ func (s *Session) handleData(streamID uint32, payload []byte) {
 	}
 }
 
-// handleClose 处理关闭请求
 func (s *Session) handleClose(streamID uint32) {
 	s.streamMgr.Unregister(streamID)
 }
 
-// tcpReadLoop TCP 读循环
 func (s *Session) tcpReadLoop(st *stream.Stream) {
 	bufPtr := transport.GetBuffer(32 * 1024)
 	buf := *bufPtr
@@ -625,13 +571,13 @@ func (s *Session) tcpReadLoop(st *stream.Stream) {
 			return
 		}
 
-		st.TCPConn.SetReadDeadline(time.Now().Add(s.sessCfg.TCPReadTimeout))
+		if err := st.TCPConn.SetReadDeadline(time.Now().Add(s.sessCfg.TCPReadTimeout)); err != nil {
+			return
+		}
 		n, err := st.TCPConn.Read(buf)
 		if err != nil {
 			if !st.IsClosed() && !s.IsStopped() {
-				// 检查是否是超时错误
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-					// 超时不是错误，继续
 					continue
 				}
 				s.send(proto.CmdClose, st.ID, nil)
@@ -647,7 +593,6 @@ func (s *Session) tcpReadLoop(st *stream.Stream) {
 	}
 }
 
-// udpReadLoop UDP 读循环
 func (s *Session) udpReadLoop(st *stream.Stream) {
 	bufPtr := transport.GetBuffer(64 * 1024)
 	buf := *bufPtr
@@ -661,12 +606,12 @@ func (s *Session) udpReadLoop(st *stream.Stream) {
 			return
 		}
 
-		st.UDPConn.SetReadDeadline(time.Now().Add(s.sessCfg.UDPReadTimeout))
+		if err := st.UDPConn.SetReadDeadline(time.Now().Add(s.sessCfg.UDPReadTimeout)); err != nil {
+			return
+		}
 		n, addr, err := st.UDPConn.ReadFromUDP(buf)
 		if err != nil {
-			// 检查是否是超时错误
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				// UDP 超时不关闭连接，继续等待
 				continue
 			}
 			if !st.IsClosed() && !s.IsStopped() {
@@ -676,7 +621,6 @@ func (s *Session) udpReadLoop(st *stream.Stream) {
 		}
 
 		if n > 0 {
-			// 使用正确的 IPv6 格式化
 			host := addr.IP.String()
 			port := uint16(addr.Port)
 			payload := proto.BuildOpenPayload(0, host, port, buf[:n])
@@ -685,7 +629,6 @@ func (s *Session) udpReadLoop(st *stream.Stream) {
 	}
 }
 
-// send 发送帧（异步）
 func (s *Session) send(cmd byte, streamID uint32, payload []byte) {
 	if s.IsStopped() {
 		return
@@ -703,60 +646,8 @@ func (s *Session) send(cmd byte, streamID uint32, payload []byte) {
 	}
 }
 
-// sendSync 同步发送帧
-func (s *Session) sendSync(cmd byte, streamID uint32, payload []byte, timeout time.Duration) error {
-	if s.IsStopped() {
-		return ErrSessionClosed
-	}
-
-	frame := proto.PackFrameAlloc(cmd, streamID, payload)
-	done := make(chan error, 1)
-
-	select {
-	case s.writeCh <- transport.WriteJob{Data: frame, Done: done}:
-	case <-time.After(timeout):
-		return ErrWriteQueueFull
-	case <-s.ctx.Done():
-		return ErrSessionClosed
-	}
-
-	select {
-	case err := <-done:
-		return err
-	case <-time.After(timeout):
-		return ErrSendTimeout
-	case <-s.ctx.Done():
-		return ErrSessionClosed
-	}
-}
-
-// sendWithRetry 带重试的发送
-func (s *Session) sendWithRetry(cmd byte, streamID uint32, payload []byte) error {
-	var lastErr error
-	for i := 0; i < s.sessCfg.MaxRetries; i++ {
-		if s.IsStopped() {
-			return ErrSessionClosed
-		}
-
-		lastErr = s.sendSync(cmd, streamID, payload, s.sessCfg.SendTimeout)
-		if lastErr == nil {
-			return nil
-		}
-
-		// 指数退避
-		delay := s.sessCfg.RetryDelay * time.Duration(1<<uint(i))
-		select {
-		case <-time.After(delay):
-		case <-s.ctx.Done():
-			return ErrSessionClosed
-		}
-	}
-	return lastErr
-}
-
 // ==================== 辅助函数 ====================
 
-// resolveWithStrategy 根据 IP 策略解析地址
 func (s *Session) resolveWithStrategy(host string, port uint16, strategy byte) string {
 	if strategy == proto.IPDefault {
 		return proto.FormatHostPort(host, port)
@@ -771,7 +662,6 @@ func (s *Session) resolveWithStrategy(host string, port uint16, strategy byte) s
 	return proto.FormatHostPort(ip.String(), port)
 }
 
-// selectIPByStrategy 根据策略选择 IP
 func selectIPByStrategy(ips []net.IP, strategy byte) net.IP {
 	var ipv4s, ipv6s []net.IP
 	for _, ip := range ips {
@@ -810,8 +700,6 @@ func selectIPByStrategy(ips []net.IP, strategy byte) net.IP {
 	return ips[0]
 }
 
-// sanitizeTarget 对目标地址进行脱敏处理
-// 在 info 级别下只显示域名/部分IP，debug 级别下显示完整地址
 func sanitizeTarget(target string, fullLog bool) string {
 	if fullLog {
 		return target
@@ -822,17 +710,14 @@ func sanitizeTarget(target string, fullLog bool) string {
 		return "***"
 	}
 
-	// 检查是否是 IP 地址
 	ip := net.ParseIP(host)
 	if ip != nil {
 		if ip.To4() != nil {
-			// IPv4: 192.168.1.100 -> 192.168.*.*
 			parts := strings.Split(host, ".")
 			if len(parts) == 4 {
 				return fmt.Sprintf("%s.%s.*.*:%s", parts[0], parts[1], port)
 			}
 		} else {
-			// IPv6: 简化显示
 			parts := strings.Split(host, ":")
 			if len(parts) >= 2 {
 				return fmt.Sprintf("[%s::*]:%s", parts[0], port)
@@ -841,21 +726,16 @@ func sanitizeTarget(target string, fullLog bool) string {
 		return fmt.Sprintf("*.*.*.*:%s", port)
 	}
 
-	// 域名：显示主域名
 	parts := strings.Split(host, ".")
 	if len(parts) > 2 {
-		// api.secret.example.com -> *.example.com
 		return fmt.Sprintf("*.%s.%s:%s", parts[len(parts)-2], parts[len(parts)-1], port)
 	}
 
 	return target
 }
 
-// isDebugLevel 检查是否为 debug 日志级别
 func isDebugLevel() bool {
 	return plog.GetLevel() <= plog.DEBUG
 }
-
-
 
 
