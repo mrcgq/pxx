@@ -25,10 +25,10 @@ const (
 )
 
 var (
-	ErrTunnelStartFailed = errors.New("tunnel start failed")
-	ErrTunnelNotRunning  = errors.New("tunnel not running")
+	ErrTunnelStartFailed   = errors.New("tunnel start failed")
+	ErrTunnelNotRunning    = errors.New("tunnel not running")
 	ErrCloudflaredNotFound = errors.New("cloudflared not found")
-	domainPattern = regexp.MustCompile(DomainRegex)
+	domainPattern          = regexp.MustCompile(DomainRegex)
 )
 
 // ==================== 隧道状态 ====================
@@ -65,20 +65,19 @@ type Tunnel struct {
 	protocol        string // "http" 或 "https"
 	noTLSVerify     bool
 
-	domain     string
-	status     int32
-	cmd        *exec.Cmd
-	logFile    string
-	
-	mu         sync.RWMutex
-	ctx        context.Context
-	cancel     context.CancelFunc
-	startTime  time.Time
+	domain       string
+	status       int32
+	cmd          *exec.Cmd
+	logFile      string
+	mu           sync.RWMutex
+	ctx          context.Context
+	cancel       context.CancelFunc
+	startTime    time.Time
 	restartCount int32
 
 	// 回调
-	OnDomainReady   func(domain string)
-	OnTunnelClosed  func(err error)
+	OnDomainReady  func(domain string)
+	OnTunnelClosed func(err error)
 }
 
 type TunnelConfig struct {
@@ -131,7 +130,7 @@ func (t *Tunnel) Start(ctx context.Context) (string, error) {
 	// 构建命令参数
 	localURL := fmt.Sprintf("%s://localhost:%d", t.protocol, t.localPort)
 	args := []string{"tunnel", "--url", localURL, "--logfile", t.logFile}
-	
+
 	if t.noTLSVerify {
 		args = append(args, "--no-tls-verify")
 	}
@@ -197,7 +196,7 @@ func (t *Tunnel) extractDomainFromLog() string {
 	if err != nil {
 		return ""
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
@@ -245,11 +244,11 @@ func (t *Tunnel) monitor() {
 	}
 
 	err := t.cmd.Wait()
-	
+
 	if t.GetStatus() == TunnelStatusRunning {
 		atomic.StoreInt32(&t.status, int32(TunnelStatusFailed))
 		plog.Warn("[Argo] 隧道进程异常退出: %v", err)
-		
+
 		if t.OnTunnelClosed != nil {
 			t.OnTunnelClosed(err)
 		}
@@ -308,6 +307,6 @@ func findFreePort() int {
 	if err != nil {
 		return 18080 // 默认端口
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	return listener.Addr().(*net.TCPAddr).Port
 }
