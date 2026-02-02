@@ -1,7 +1,3 @@
-
-
-//internal/transport/websocket.go
-
 package transport
 
 import (
@@ -22,7 +18,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"phantom-x/internal/ech"
+	utls "github.com/refraction-networking/utls"
 	"phantom-x/pkg/config"
 	"phantom-x/pkg/metrics"
 )
@@ -56,346 +52,53 @@ type WriteJob struct {
 	Done     chan error
 }
 
-// ==================== WebSocket 连接包装器 ====================
+// ==================== WSConn 结构体保持不变 ====================
+// (与原代码相同，省略)
 
-type WSConn struct {
-	ID        int
-	conn      *websocket.Conn
-	writeCh   chan WriteJob
-	closed    int32
-	ctx       context.Context
-	cancel    context.CancelFunc
-	closeOnce sync.Once
-	closeMu   sync.Mutex
-
-	// 活跃时间
-	lastActive int64 // Unix nano
-
-	// 统计
-	bytesSent   int64
-	bytesRecv   int64
-	packetsSent int64
-	packetsRecv int64
-
-	// 配置
-	writeTimeout time.Duration
-	readTimeout  time.Duration
-}
-
-func NewWSConn(id int, conn *websocket.Conn, queueSize int) *WSConn {
-	if queueSize <= 0 {
-		queueSize = DefaultWriteQueueSize
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	return &WSConn{
-		ID:           id,
-		conn:         conn,
-		writeCh:      make(chan WriteJob, queueSize),
-		ctx:          ctx,
-		cancel:       cancel,
-		lastActive:   time.Now().UnixNano(),
-		writeTimeout: DefaultWriteTimeout,
-		readTimeout:  DefaultReadTimeout,
-	}
-}
-
-// SetWriteTimeout 设置写超时
-func (w *WSConn) SetWriteTimeout(d time.Duration) {
-	w.writeTimeout = d
-}
-
-// SetReadTimeout 设置读超时
-func (w *WSConn) SetReadTimeout(d time.Duration) {
-	w.readTimeout = d
-}
-
-// Send 异步发送数据
-func (w *WSConn) Send(data []byte, priority bool) error {
-	if w.IsClosed() {
-		return ErrConnectionClosed
-	}
-
-	job := WriteJob{
-		Data:     data,
-		Priority: priority,
-	}
-
-	if priority {
-		select {
-		case w.writeCh <- job:
-			return nil
-		default:
-		}
-	}
-
-	select {
-	case w.writeCh <- job:
-		return nil
-	case <-time.After(w.writeTimeout):
-		metrics.IncrWriteTimeout()
-		return ErrWriteTimeout
-	case <-w.ctx.Done():
-		return ErrConnectionClosing
-	}
-}
-
-// SendSync 同步发送数据，等待写入完成
-func (w *WSConn) SendSync(data []byte, timeout time.Duration) error {
-	if w.IsClosed() {
-		return ErrConnectionClosed
-	}
-
-	if timeout <= 0 {
-		timeout = w.writeTimeout
-	}
-
-	job := WriteJob{
-		Data:     data,
-		Priority: true,
-		Done:     make(chan error, 1),
-	}
-
-	select {
-	case w.writeCh <- job:
-	case <-time.After(timeout):
-		return ErrWriteQueueFull
-	case <-w.ctx.Done():
-		return ErrConnectionClosing
-	}
-
-	select {
-	case err := <-job.Done:
-		return err
-	case <-time.After(timeout):
-		return ErrWriteTimeout
-	case <-w.ctx.Done():
-		return ErrConnectionClosing
-	}
-}
-
-// Close 关闭连接
-func (w *WSConn) Close() {
-	w.closeOnce.Do(func() {
-		atomic.StoreInt32(&w.closed, 1)
-
-		w.cancel()
-
-		if w.conn != nil {
-			_ = w.conn.SetWriteDeadline(time.Now().Add(CloseGracePeriod))
-			_ = w.conn.WriteMessage(
-				websocket.CloseMessage,
-				websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
-			)
-			w.conn.Close()
-		}
-
-		w.drainWriteChannel()
-	})
-}
-
-// drainWriteChannel 安全地排空写通道
-func (w *WSConn) drainWriteChannel() {
-	for {
-		select {
-		case job, ok := <-w.writeCh:
-			if !ok {
-				return
-			}
-			if job.Done != nil {
-				select {
-				case job.Done <- ErrConnectionClosed:
-				default:
-				}
-			}
-		default:
-			return
-		}
-	}
-}
-
-// IsClosed 检查连接是否已关闭
-func (w *WSConn) IsClosed() bool {
-	return atomic.LoadInt32(&w.closed) == 1
-}
-
-// UpdateActive 更新活跃时间
-func (w *WSConn) UpdateActive() {
-	atomic.StoreInt64(&w.lastActive, time.Now().UnixNano())
-}
-
-// GetLastActive 获取最后活跃时间
-func (w *WSConn) GetLastActive() time.Time {
-	return time.Unix(0, atomic.LoadInt64(&w.lastActive))
-}
-
-// IdleDuration 获取空闲时长
-func (w *WSConn) IdleDuration() time.Duration {
-	return time.Since(w.GetLastActive())
-}
-
-// WriteMessage 直接写入消息（用于控制帧）
-func (w *WSConn) WriteMessage(msgType int, data []byte) error {
-	if w.IsClosed() {
-		return ErrConnectionClosed
-	}
-
-	w.closeMu.Lock()
-	defer w.closeMu.Unlock()
-
-	if w.conn == nil {
-		return ErrConnectionClosed
-	}
-
-	if err := w.conn.SetWriteDeadline(time.Now().Add(w.writeTimeout)); err != nil {
-		return err
-	}
-	err := w.conn.WriteMessage(msgType, data)
-	if err == nil {
-		atomic.AddInt64(&w.bytesSent, int64(len(data)))
-		atomic.AddInt64(&w.packetsSent, 1)
-		w.UpdateActive()
-	}
-	return err
-}
-
-// ReadMessage 读取消息
-func (w *WSConn) ReadMessage() (int, []byte, error) {
-	if w.IsClosed() {
-		return 0, nil, ErrConnectionClosed
-	}
-
-	msgType, data, err := w.conn.ReadMessage()
-	if err == nil {
-		atomic.AddInt64(&w.bytesRecv, int64(len(data)))
-		atomic.AddInt64(&w.packetsRecv, 1)
-		w.UpdateActive()
-	}
-	return msgType, data, err
-}
-
-// SetReadDeadline 设置读取超时
-func (w *WSConn) SetReadDeadline(t time.Time) error {
-	if w.conn == nil {
-		return ErrConnectionClosed
-	}
-	return w.conn.SetReadDeadline(t)
-}
-
-// SetWriteDeadline 设置写入超时
-func (w *WSConn) SetWriteDeadline(t time.Time) error {
-	if w.conn == nil {
-		return ErrConnectionClosed
-	}
-	return w.conn.SetWriteDeadline(t)
-}
-
-// SetPongHandler 设置 Pong 处理器
-func (w *WSConn) SetPongHandler(h func(string) error) {
-	if w.conn != nil {
-		w.conn.SetPongHandler(h)
-	}
-}
-
-// SetPingHandler 设置 Ping 处理器
-func (w *WSConn) SetPingHandler(h func(string) error) {
-	if w.conn != nil {
-		w.conn.SetPingHandler(h)
-	}
-}
-
-// Ping 发送 Ping 帧
-func (w *WSConn) Ping() error {
-	if w.IsClosed() {
-		return ErrConnectionClosed
-	}
-
-	w.closeMu.Lock()
-	defer w.closeMu.Unlock()
-
-	if w.conn == nil {
-		return ErrConnectionClosed
-	}
-
-	if err := w.conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
-		return err
-	}
-	return w.conn.WriteMessage(websocket.PingMessage, nil)
-}
-
-// Context 返回连接的 context
-func (w *WSConn) Context() context.Context {
-	return w.ctx
-}
-
-// RemoteAddr 返回远程地址
-func (w *WSConn) RemoteAddr() net.Addr {
-	if w.conn != nil {
-		return w.conn.RemoteAddr()
-	}
-	return nil
-}
-
-// LocalAddr 返回本地地址
-func (w *WSConn) LocalAddr() net.Addr {
-	if w.conn != nil {
-		return w.conn.LocalAddr()
-	}
-	return nil
-}
-
-// WriteCh 返回写通道（用于写循环）
-func (w *WSConn) WriteCh() <-chan WriteJob {
-	return w.writeCh
-}
-
-// GetStats 获取统计信息
-func (w *WSConn) GetStats() (bytesSent, bytesRecv, packetsSent, packetsRecv int64) {
-	return atomic.LoadInt64(&w.bytesSent),
-		atomic.LoadInt64(&w.bytesRecv),
-		atomic.LoadInt64(&w.packetsSent),
-		atomic.LoadInt64(&w.packetsRecv)
-}
-
-// AddBytesSent 增加发送字节统计
-func (w *WSConn) AddBytesSent(n int64) {
-	atomic.AddInt64(&w.bytesSent, n)
-}
-
-// AddBytesRecv 增加接收字节统计
-func (w *WSConn) AddBytesRecv(n int64) {
-	atomic.AddInt64(&w.bytesRecv, n)
-}
-
-// AddPacketsSent 增加发送包统计
-func (w *WSConn) AddPacketsSent(n int64) {
-	atomic.AddInt64(&w.packetsSent, n)
-}
-
-// AddPacketsRecv 增加接收包统计
-func (w *WSConn) AddPacketsRecv(n int64) {
-	atomic.AddInt64(&w.packetsRecv, n)
-}
-
-// RawConn 返回底层 WebSocket 连接（谨慎使用）
-func (w *WSConn) RawConn() *websocket.Conn {
-	return w.conn
-}
-
-// ==================== WebSocket 拨号器 ====================
+// ==================== WebSocket 拨号器 (重写) ====================
 
 type Dialer struct {
-	cfg *config.ClientConfig
+	cfg         *config.ClientConfig
+	fingerprint utls.ClientHelloID
 }
 
 func NewDialer(cfg *config.ClientConfig) *Dialer {
-	return &Dialer{cfg: cfg}
+	d := &Dialer{cfg: cfg}
+	d.fingerprint = d.getClientHelloID()
+	return d
+}
+
+// getClientHelloID 根据配置获取 uTLS 指纹
+func (d *Dialer) getClientHelloID() utls.ClientHelloID {
+	switch strings.ToLower(d.cfg.Fingerprint) {
+	case "chrome":
+		return utls.HelloChrome_Auto
+	case "firefox":
+		return utls.HelloFirefox_Auto
+	case "safari":
+		return utls.HelloSafari_Auto
+	case "ios":
+		return utls.HelloIOS_Auto
+	case "android":
+		return utls.HelloAndroid_11_OkHttp
+	case "edge":
+		return utls.HelloEdge_Auto
+	case "360":
+		return utls.Hello360_Auto
+	case "qq":
+		return utls.HelloQQ_Auto
+	case "random":
+		return utls.HelloRandomized
+	default:
+		return utls.HelloChrome_Auto
+	}
 }
 
 func (d *Dialer) Dial(serverURL string, clientID string) (*websocket.Conn, error) {
 	return d.DialWithContext(context.Background(), serverURL, clientID)
 }
 
+// DialWithContext 使用 uTLS 建立 WebSocket 连接
 func (d *Dialer) DialWithContext(ctx context.Context, serverURL string, clientID string) (*websocket.Conn, error) {
 	u, err := url.Parse(serverURL)
 	if err != nil {
@@ -406,22 +109,43 @@ func (d *Dialer) DialWithContext(ctx context.Context, serverURL string, clientID
 	q.Set("id", clientID)
 	u.RawQuery = q.Encode()
 
-	tlsConfig, err := d.buildTLSConfig(u.Hostname())
-	if err != nil {
-		return nil, fmt.Errorf("build TLS config: %w", err)
+	// 确定目标地址
+	host := u.Hostname()
+	port := u.Port()
+	if port == "" {
+		if u.Scheme == "wss" {
+			port = "443"
+		} else {
+			port = "80"
+		}
 	}
 
 	dialer := websocket.Dialer{
-		TLSClientConfig:   tlsConfig,
 		HandshakeTimeout:  10 * time.Second,
 		ReadBufferSize:    64 * 1024,
 		WriteBufferSize:   64 * 1024,
 		EnableCompression: false,
 	}
 
+	// 设置 Token
 	if d.cfg.Token != "" {
 		signedToken := GenerateSignedToken(d.cfg.Token, clientID)
 		dialer.Subprotocols = []string{signedToken}
+	}
+
+	// 根据配置决定使用 uTLS 还是标准 TLS
+	if u.Scheme == "wss" && d.cfg.EnableUTLS && !d.cfg.Insecure {
+		// 使用 uTLS
+		dialer.NetDialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return d.dialWithUTLS(ctx, network, addr, host)
+		}
+	} else if u.Scheme == "wss" {
+		// 使用标准 TLS
+		dialer.TLSClientConfig = &tls.Config{
+			ServerName:         host,
+			InsecureSkipVerify: d.cfg.Insecure,
+			MinVersion:         tls.VersionTLS12,
+		}
 	}
 
 	conn, resp, err := dialer.DialContext(ctx, u.String(), nil)
@@ -442,28 +166,79 @@ func (d *Dialer) DialWithContext(ctx context.Context, serverURL string, clientID
 	return conn, nil
 }
 
-func (d *Dialer) buildTLSConfig(hostname string) (*tls.Config, error) {
-	var tlsConfig *tls.Config
-	var err error
-
-	if d.cfg.EnableECH && !d.cfg.Insecure {
-		tlsConfig, err = ech.BuildTLSConfig(hostname, d.cfg.Insecure)
-		if err != nil {
-			tlsConfig = &tls.Config{
-				MinVersion:         tls.VersionTLS13,
-				ServerName:         hostname,
-				InsecureSkipVerify: d.cfg.Insecure,
-			}
-		}
-	} else {
-		tlsConfig = &tls.Config{
-			MinVersion:         tls.VersionTLS13,
-			ServerName:         hostname,
-			InsecureSkipVerify: d.cfg.Insecure,
-		}
+// DialWithOptimalIP 使用优选 IP 和自定义 SNI 建立连接
+func (d *Dialer) DialWithOptimalIP(ctx context.Context, serverURL string, clientID string, optimalIP string) (*websocket.Conn, error) {
+	u, err := url.Parse(serverURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse URL: %w", err)
 	}
 
-	return tlsConfig, nil
+	q := u.Query()
+	q.Set("id", clientID)
+	u.RawQuery = q.Encode()
+
+	host := u.Hostname()
+	port := u.Port()
+	if port == "" {
+		port = "443"
+	}
+
+	dialer := websocket.Dialer{
+		HandshakeTimeout:  10 * time.Second,
+		ReadBufferSize:    64 * 1024,
+		WriteBufferSize:   64 * 1024,
+		EnableCompression: false,
+	}
+
+	if d.cfg.Token != "" {
+		signedToken := GenerateSignedToken(d.cfg.Token, clientID)
+		dialer.Subprotocols = []string{signedToken}
+	}
+
+	// 使用优选 IP + SNI (host)
+	targetAddr := net.JoinHostPort(optimalIP, port)
+	
+	dialer.NetDialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		// 直接连接优选 IP，但 SNI 使用原始域名
+		return d.dialWithUTLS(ctx, network, targetAddr, host)
+	}
+
+	conn, resp, err := dialer.DialContext(ctx, u.String(), nil)
+	if err != nil {
+		if resp != nil && resp.StatusCode == http.StatusUnauthorized {
+			return nil, ErrAuthFailed
+		}
+		return nil, err
+	}
+
+	return conn, nil
+}
+
+// dialWithUTLS 使用 uTLS 建立 TLS 连接
+func (d *Dialer) dialWithUTLS(ctx context.Context, network, addr, sni string) (net.Conn, error) {
+	// 建立 TCP 连接
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	tcpConn, err := dialer.DialContext(ctx, network, addr)
+	if err != nil {
+		return nil, fmt.Errorf("TCP dial: %w", err)
+	}
+
+	// 创建 uTLS 连接
+	uConfig := &utls.Config{
+		ServerName:         sni,
+		InsecureSkipVerify: d.cfg.Insecure,
+		MinVersion:         tls.VersionTLS12,
+	}
+
+	uConn := utls.UClient(tcpConn, uConfig, d.fingerprint)
+
+	// 执行握手
+	if err := uConn.HandshakeContext(ctx); err != nil {
+		tcpConn.Close()
+		return nil, fmt.Errorf("TLS handshake: %w", err)
+	}
+
+	return uConn, nil
 }
 
 // GenerateSignedToken 生成签名的认证令牌
@@ -478,7 +253,7 @@ func GenerateSignedToken(secret, clientID string) string {
 	return fmt.Sprintf("%s:%d:%s", clientID, timestamp, signature)
 }
 
-// ==================== WebSocket 升级器 (服务端) ====================
+// ==================== WebSocket 升级器 (服务端，保持不变) ====================
 
 type Upgrader struct {
 	cfg      *config.ServerConfig
@@ -585,7 +360,6 @@ func abs(x int64) int64 {
 	return x
 }
 
-// IsNormalClose 检查是否是正常关闭错误
 func IsNormalClose(err error) bool {
 	if err == nil {
 		return false
@@ -613,12 +387,10 @@ func IsNormalClose(err error) bool {
 	return false
 }
 
-// IsTemporaryError 检查是否是临时错误
 func IsTemporaryError(err error) bool {
 	return IsTimeoutError(err)
 }
 
-// IsTimeoutError 检查是否是超时错误
 func IsTimeoutError(err error) bool {
 	if ne, ok := err.(net.Error); ok {
 		return ne.Timeout()
@@ -626,3 +398,298 @@ func IsTimeoutError(err error) bool {
 	return false
 }
 
+// ==================== WSConn 完整实现 ====================
+
+type WSConn struct {
+	ID        int
+	conn      *websocket.Conn
+	writeCh   chan WriteJob
+	closed    int32
+	ctx       context.Context
+	cancel    context.CancelFunc
+	closeOnce sync.Once
+	closeMu   sync.Mutex
+
+	lastActive int64
+
+	bytesSent   int64
+	bytesRecv   int64
+	packetsSent int64
+	packetsRecv int64
+
+	writeTimeout time.Duration
+	readTimeout  time.Duration
+}
+
+func NewWSConn(id int, conn *websocket.Conn, queueSize int) *WSConn {
+	if queueSize <= 0 {
+		queueSize = DefaultWriteQueueSize
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	return &WSConn{
+		ID:           id,
+		conn:         conn,
+		writeCh:      make(chan WriteJob, queueSize),
+		ctx:          ctx,
+		cancel:       cancel,
+		lastActive:   time.Now().UnixNano(),
+		writeTimeout: DefaultWriteTimeout,
+		readTimeout:  DefaultReadTimeout,
+	}
+}
+
+func (w *WSConn) SetWriteTimeout(d time.Duration) {
+	w.writeTimeout = d
+}
+
+func (w *WSConn) SetReadTimeout(d time.Duration) {
+	w.readTimeout = d
+}
+
+func (w *WSConn) Send(data []byte, priority bool) error {
+	if w.IsClosed() {
+		return ErrConnectionClosed
+	}
+
+	job := WriteJob{
+		Data:     data,
+		Priority: priority,
+	}
+
+	if priority {
+		select {
+		case w.writeCh <- job:
+			return nil
+		default:
+		}
+	}
+
+	select {
+	case w.writeCh <- job:
+		return nil
+	case <-time.After(w.writeTimeout):
+		metrics.IncrWriteTimeout()
+		return ErrWriteTimeout
+	case <-w.ctx.Done():
+		return ErrConnectionClosing
+	}
+}
+
+func (w *WSConn) SendSync(data []byte, timeout time.Duration) error {
+	if w.IsClosed() {
+		return ErrConnectionClosed
+	}
+
+	if timeout <= 0 {
+		timeout = w.writeTimeout
+	}
+
+	job := WriteJob{
+		Data:     data,
+		Priority: true,
+		Done:     make(chan error, 1),
+	}
+
+	select {
+	case w.writeCh <- job:
+	case <-time.After(timeout):
+		return ErrWriteQueueFull
+	case <-w.ctx.Done():
+		return ErrConnectionClosing
+	}
+
+	select {
+	case err := <-job.Done:
+		return err
+	case <-time.After(timeout):
+		return ErrWriteTimeout
+	case <-w.ctx.Done():
+		return ErrConnectionClosing
+	}
+}
+
+func (w *WSConn) Close() {
+	w.closeOnce.Do(func() {
+		atomic.StoreInt32(&w.closed, 1)
+
+		w.cancel()
+
+		if w.conn != nil {
+			_ = w.conn.SetWriteDeadline(time.Now().Add(CloseGracePeriod))
+			_ = w.conn.WriteMessage(
+				websocket.CloseMessage,
+				websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
+			)
+			w.conn.Close()
+		}
+
+		w.drainWriteChannel()
+	})
+}
+
+func (w *WSConn) drainWriteChannel() {
+	for {
+		select {
+		case job, ok := <-w.writeCh:
+			if !ok {
+				return
+			}
+			if job.Done != nil {
+				select {
+				case job.Done <- ErrConnectionClosed:
+				default:
+				}
+			}
+		default:
+			return
+		}
+	}
+}
+
+func (w *WSConn) IsClosed() bool {
+	return atomic.LoadInt32(&w.closed) == 1
+}
+
+func (w *WSConn) UpdateActive() {
+	atomic.StoreInt64(&w.lastActive, time.Now().UnixNano())
+}
+
+func (w *WSConn) GetLastActive() time.Time {
+	return time.Unix(0, atomic.LoadInt64(&w.lastActive))
+}
+
+func (w *WSConn) IdleDuration() time.Duration {
+	return time.Since(w.GetLastActive())
+}
+
+func (w *WSConn) WriteMessage(msgType int, data []byte) error {
+	if w.IsClosed() {
+		return ErrConnectionClosed
+	}
+
+	w.closeMu.Lock()
+	defer w.closeMu.Unlock()
+
+	if w.conn == nil {
+		return ErrConnectionClosed
+	}
+
+	if err := w.conn.SetWriteDeadline(time.Now().Add(w.writeTimeout)); err != nil {
+		return err
+	}
+	err := w.conn.WriteMessage(msgType, data)
+	if err == nil {
+		atomic.AddInt64(&w.bytesSent, int64(len(data)))
+		atomic.AddInt64(&w.packetsSent, 1)
+		w.UpdateActive()
+	}
+	return err
+}
+
+func (w *WSConn) ReadMessage() (int, []byte, error) {
+	if w.IsClosed() {
+		return 0, nil, ErrConnectionClosed
+	}
+
+	msgType, data, err := w.conn.ReadMessage()
+	if err == nil {
+		atomic.AddInt64(&w.bytesRecv, int64(len(data)))
+		atomic.AddInt64(&w.packetsRecv, 1)
+		w.UpdateActive()
+	}
+	return msgType, data, err
+}
+
+func (w *WSConn) SetReadDeadline(t time.Time) error {
+	if w.conn == nil {
+		return ErrConnectionClosed
+	}
+	return w.conn.SetReadDeadline(t)
+}
+
+func (w *WSConn) SetWriteDeadline(t time.Time) error {
+	if w.conn == nil {
+		return ErrConnectionClosed
+	}
+	return w.conn.SetWriteDeadline(t)
+}
+
+func (w *WSConn) SetPongHandler(h func(string) error) {
+	if w.conn != nil {
+		w.conn.SetPongHandler(h)
+	}
+}
+
+func (w *WSConn) SetPingHandler(h func(string) error) {
+	if w.conn != nil {
+		w.conn.SetPingHandler(h)
+	}
+}
+
+func (w *WSConn) Ping() error {
+	if w.IsClosed() {
+		return ErrConnectionClosed
+	}
+
+	w.closeMu.Lock()
+	defer w.closeMu.Unlock()
+
+	if w.conn == nil {
+		return ErrConnectionClosed
+	}
+
+	if err := w.conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return err
+	}
+	return w.conn.WriteMessage(websocket.PingMessage, nil)
+}
+
+func (w *WSConn) Context() context.Context {
+	return w.ctx
+}
+
+func (w *WSConn) RemoteAddr() net.Addr {
+	if w.conn != nil {
+		return w.conn.RemoteAddr()
+	}
+	return nil
+}
+
+func (w *WSConn) LocalAddr() net.Addr {
+	if w.conn != nil {
+		return w.conn.LocalAddr()
+	}
+	return nil
+}
+
+func (w *WSConn) WriteCh() <-chan WriteJob {
+	return w.writeCh
+}
+
+func (w *WSConn) GetStats() (bytesSent, bytesRecv, packetsSent, packetsRecv int64) {
+	return atomic.LoadInt64(&w.bytesSent),
+		atomic.LoadInt64(&w.bytesRecv),
+		atomic.LoadInt64(&w.packetsSent),
+		atomic.LoadInt64(&w.packetsRecv)
+}
+
+func (w *WSConn) AddBytesSent(n int64) {
+	atomic.AddInt64(&w.bytesSent, n)
+}
+
+func (w *WSConn) AddBytesRecv(n int64) {
+	atomic.AddInt64(&w.bytesRecv, n)
+}
+
+func (w *WSConn) AddPacketsSent(n int64) {
+	atomic.AddInt64(&w.packetsSent, n)
+}
+
+func (w *WSConn) AddPacketsRecv(n int64) {
+	atomic.AddInt64(&w.packetsRecv, n)
+}
+
+func (w *WSConn) RawConn() *websocket.Conn {
+	return w.conn
+}
