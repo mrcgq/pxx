@@ -1,16 +1,16 @@
-
-
-//internal/pool/connpool.go
 package pool
 
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"phantom-x/internal/argo"
 	"phantom-x/internal/proto"
 	"phantom-x/internal/transport"
 	"phantom-x/pkg/config"
@@ -44,7 +44,29 @@ const (
 	DefaultSendTimeout      = 5 * time.Second
 	AggFlushThreshold       = 0.8
 	MaxPooledItemsCap       = 64
+	DirectProbeInterval     = 5 * time.Minute
+	MaxDirectFailures       = 3
 )
+
+// ==================== 连接模式 ====================
+
+type ConnectionMode int32
+
+const (
+	ModeDirect ConnectionMode = iota
+	ModeArgo
+)
+
+func (m ConnectionMode) String() string {
+	switch m {
+	case ModeDirect:
+		return "direct"
+	case ModeArgo:
+		return "argo"
+	default:
+		return "unknown"
+	}
+}
 
 // ==================== 对象池 ====================
 
@@ -67,11 +89,9 @@ func putAggregatedData(agg *proto.AggregatedData) {
 	if agg == nil {
 		return
 	}
-
 	if cap(agg.Items) > MaxPooledItemsCap {
 		return
 	}
-
 	for i := range agg.Items {
 		agg.Items[i].StreamID = 0
 		agg.Items[i].Data = nil
@@ -95,10 +115,11 @@ type Config struct {
 	ReconnectDelay time.Duration
 	MaxBackoff     time.Duration
 
-	EnableECH bool
-	ECHDomain string
-	ECHDns    string
+	// uTLS
+	EnableUTLS  bool
+	Fingerprint string
 
+	// Padding
 	EnablePadding     bool
 	PaddingMinSize    int
 	PaddingMaxSize    int
@@ -106,6 +127,12 @@ type Config struct {
 
 	AggregateDelay time.Duration
 	MaxAggSize     int
+
+	// Argo 相关
+	ArgoTunnel        *argo.Tunnel
+	CFOptimizer       *argo.CFOptimizer
+	ArgoFallback      bool
+	OriginalServerURL string
 }
 
 func (c *Config) Validate() {
@@ -153,6 +180,13 @@ type ConnPool struct {
 	stopCh       chan struct{}
 	wg           sync.WaitGroup
 	nextConnIdx  uint32
+
+	// 连接模式
+	mode            int32
+	directFailures  int32
+	argoServerURL   string
+	lastDirectProbe time.Time
+	modeMu          sync.RWMutex
 }
 
 type PoolConn struct {
@@ -176,13 +210,12 @@ func NewConnPool(cfg *Config) *ConnPool {
 	cfg.Validate()
 
 	clientCfg := &config.ClientConfig{
-		Server:    cfg.ServerURL,
-		Token:     cfg.Token,
-		ClientID:  cfg.ClientID,
-		Insecure:  cfg.Insecure,
-		EnableECH: cfg.EnableECH,
-		ECHDomain: cfg.ECHDomain,
-		ECHDns:    cfg.ECHDns,
+		Server:      cfg.ServerURL,
+		Token:       cfg.Token,
+		ClientID:    cfg.ClientID,
+		Insecure:    cfg.Insecure,
+		EnableUTLS:  cfg.EnableUTLS,
+		Fingerprint: cfg.Fingerprint,
 	}
 
 	return &ConnPool{
@@ -190,6 +223,7 @@ func NewConnPool(cfg *Config) *ConnPool {
 		dialer: transport.NewDialer(clientCfg),
 		conns:  make([]*PoolConn, cfg.NumConnections),
 		stopCh: make(chan struct{}),
+		mode:   int32(ModeDirect),
 	}
 }
 
@@ -207,6 +241,12 @@ func (p *ConnPool) Start() error {
 		go p.maintainConnection(i)
 	}
 
+	// 启动直连探测（如果使用 Argo 回落模式）
+	if p.cfg.ArgoFallback && p.cfg.ArgoTunnel != nil {
+		p.wg.Add(1)
+		go p.directProbeLoop()
+	}
+
 	return nil
 }
 
@@ -222,6 +262,11 @@ func (p *ConnPool) IsRunning() bool {
 	return atomic.LoadInt32(&p.running) == 1
 }
 
+func (p *ConnPool) GetMode() ConnectionMode {
+	return ConnectionMode(atomic.LoadInt32(&p.mode))
+}
+
+// maintainConnection 维护单个连接
 func (p *ConnPool) maintainConnection(id int) {
 	defer p.wg.Done()
 
@@ -234,10 +279,26 @@ func (p *ConnPool) maintainConnection(id int) {
 		default:
 		}
 
-		conn, err := p.dialer.Dial(p.cfg.ServerURL, p.cfg.ClientID)
+		// 根据当前模式选择服务器地址
+		serverURL, optimalIP := p.getConnectionTarget()
+
+		// 拨号
+		var conn *websocket.Conn
+		var err error
+
+		if optimalIP != "" {
+			// 使用优选 IP
+			conn, err = p.dialer.DialWithOptimalIP(context.Background(), serverURL, p.cfg.ClientID, optimalIP)
+		} else {
+			conn, err = p.dialer.Dial(serverURL, p.cfg.ClientID)
+		}
+
 		if err != nil {
 			plog.Debug("[Pool] Connection %d dial failed: %v", id, err)
 			metrics.IncrConnectError()
+
+			// 处理连接失败
+			p.handleConnectFailure(err)
 
 			select {
 			case <-p.stopCh:
@@ -252,8 +313,12 @@ func (p *ConnPool) maintainConnection(id int) {
 			continue
 		}
 
+		// 连接成功
 		backoff = p.cfg.ReconnectDelay
-		plog.Info("[Pool] Connection %d established", id)
+		p.handleConnectSuccess()
+
+		mode := p.GetMode()
+		plog.Info("[Pool] Connection %d established (mode: %s)", id, mode)
 		metrics.IncrActiveConnections()
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -294,6 +359,166 @@ func (p *ConnPool) maintainConnection(id int) {
 		plog.Info("[Pool] Connection %d closed, reconnecting...", id)
 	}
 }
+
+// getConnectionTarget 获取当前应该连接的目标
+func (p *ConnPool) getConnectionTarget() (serverURL string, optimalIP string) {
+	mode := p.GetMode()
+
+	if mode == ModeArgo {
+		p.modeMu.RLock()
+		serverURL = p.argoServerURL
+		p.modeMu.RUnlock()
+
+		if serverURL == "" {
+			serverURL = p.cfg.ServerURL
+		}
+
+		// 获取优选 IP
+		if p.cfg.CFOptimizer != nil {
+			optimalIP, _ = p.cfg.CFOptimizer.GetOptimalIP()
+		}
+	} else {
+		serverURL = p.cfg.ServerURL
+	}
+
+	return serverURL, optimalIP
+}
+
+// handleConnectFailure 处理连接失败
+func (p *ConnPool) handleConnectFailure(err error) {
+	mode := p.GetMode()
+
+	if mode == ModeDirect && p.cfg.ArgoFallback && p.cfg.ArgoTunnel != nil {
+		failures := atomic.AddInt32(&p.directFailures, 1)
+		
+		if failures >= MaxDirectFailures {
+			plog.Warn("[Pool] 直连失败 %d 次，切换到 Argo 模式", failures)
+			p.switchToArgo()
+		}
+	}
+}
+
+// handleConnectSuccess 处理连接成功
+func (p *ConnPool) handleConnectSuccess() {
+	mode := p.GetMode()
+
+	if mode == ModeDirect {
+		atomic.StoreInt32(&p.directFailures, 0)
+	}
+}
+
+// switchToArgo 切换到 Argo 模式
+func (p *ConnPool) switchToArgo() {
+	if p.cfg.ArgoTunnel == nil {
+		return
+	}
+
+	p.modeMu.Lock()
+	defer p.modeMu.Unlock()
+
+	if ConnectionMode(atomic.LoadInt32(&p.mode)) == ModeArgo {
+		return // 已经是 Argo 模式
+	}
+
+	// 启动隧道
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	domain, err := p.cfg.ArgoTunnel.Start(ctx)
+	if err != nil {
+		plog.Error("[Pool] Argo 隧道启动失败: %v", err)
+		return
+	}
+
+	// 构建 Argo 服务器 URL
+	wsPath := getWSPath(p.cfg.OriginalServerURL)
+	p.argoServerURL = fmt.Sprintf("wss://%s%s", domain, wsPath)
+
+	// 执行 CF 优选
+	if p.cfg.CFOptimizer != nil {
+		go func() {
+			if ip, latency, err := p.cfg.CFOptimizer.FindOptimalIP(context.Background()); err == nil && ip != "" {
+				plog.Info("[Pool] Argo 模式优选 IP: %s (%v)", ip, latency)
+			}
+		}()
+	}
+
+	atomic.StoreInt32(&p.mode, int32(ModeArgo))
+	plog.Info("[Pool] 已切换到 Argo 模式: %s", domain)
+}
+
+// switchToDirect 切换回直连模式
+func (p *ConnPool) switchToDirect() {
+	p.modeMu.Lock()
+	defer p.modeMu.Unlock()
+
+	if ConnectionMode(atomic.LoadInt32(&p.mode)) == ModeDirect {
+		return
+	}
+
+	atomic.StoreInt32(&p.mode, int32(ModeDirect))
+	atomic.StoreInt32(&p.directFailures, 0)
+	p.lastDirectProbe = time.Now()
+
+	plog.Info("[Pool] 已切换回直连模式")
+
+	// 停止 Argo 隧道
+	if p.cfg.ArgoTunnel != nil {
+		go p.cfg.ArgoTunnel.Stop()
+	}
+}
+
+// directProbeLoop 定期探测直连是否恢复
+func (p *ConnPool) directProbeLoop() {
+	defer p.wg.Done()
+
+	ticker := time.NewTicker(DirectProbeInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-p.stopCh:
+			return
+		case <-ticker.C:
+			if p.GetMode() == ModeArgo {
+				if p.probeDirectConnection() {
+					plog.Info("[Pool] 直连恢复，切换回直连模式")
+					p.switchToDirect()
+				}
+			}
+		}
+	}
+}
+
+// probeDirectConnection 探测直连是否可用
+func (p *ConnPool) probeDirectConnection() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	conn, err := p.dialer.DialWithContext(ctx, p.cfg.OriginalServerURL, p.cfg.ClientID)
+	if err != nil {
+		plog.Debug("[Pool] 直连探测失败: %v", err)
+		return false
+	}
+	defer conn.Close()
+
+	plog.Debug("[Pool] 直连探测成功")
+	return true
+}
+
+// getWSPath 从 URL 提取 WebSocket 路径
+func getWSPath(serverURL string) string {
+	u, err := url.Parse(serverURL)
+	if err != nil {
+		return "/ws"
+	}
+	if u.Path == "" {
+		return "/ws"
+	}
+	return u.Path
+}
+
+// ==================== PoolConn 方法 ====================
 
 func (w *PoolConn) serve() {
 	var wg sync.WaitGroup
@@ -827,6 +1052,3 @@ func (p *ConnPool) GetTotalStats() (bytesSent, bytesRecv, packetsSent, packetsRe
 	}
 	return
 }
-
-
-
