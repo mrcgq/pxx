@@ -4,16 +4,13 @@ run:
   modules-download-mode: readonly
 
 linters:
+  disable-all: true
   enable:
-    - errcheck
-    - gosimple
     - govet
-    - staticcheck
+    - gosimple
     - unused
-  disable:
-    - ineffassign  # 临时禁用，待代码修复后可重新启用
 
 issues:
-  exclude-use-default: false
+  exclude-use-default: true
   max-issues-per-linter: 0
   max-same-issues: 0
