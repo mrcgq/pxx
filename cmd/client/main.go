@@ -1,10 +1,9 @@
 
-
 //cmd/client/main.go
-
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -13,7 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"phantom-x/internal/ech"
+	"phantom-x/internal/argo"
 	"phantom-x/internal/pool"
 	"phantom-x/internal/proto"
 	"phantom-x/internal/socks5"
@@ -24,7 +23,7 @@ import (
 )
 
 var (
-	Version   = "1.0.0"
+	Version   = "1.1.0"
 	BuildTime = "unknown"
 	GitCommit = "unknown"
 )
@@ -38,7 +37,14 @@ func main() {
 	token := flag.String("token", "", "认证令牌")
 	socksAddr := flag.String("l", "", "SOCKS5监听地址")
 	insecure := flag.Bool("insecure", false, "跳过证书验证")
-	noECH := flag.Bool("no-ech", false, "禁用ECH")
+	noUTLS := flag.Bool("no-utls", false, "禁用 uTLS 指纹")
+	fingerprint := flag.String("fp", "", "TLS 指纹 (chrome/firefox/safari/ios/android)")
+	
+	// Argo 相关
+	enableArgo := flag.Bool("argo", false, "启用 Argo 隧道")
+	argoMode := flag.String("argo-mode", "", "Argo 模式 (auto/always/fallback)")
+	cfOptimize := flag.Bool("cf-optimize", false, "启用 Cloudflare IP 优选")
+	cfIP := flag.String("cf-ip", "", "手动指定 Cloudflare IP")
 
 	flag.Parse()
 
@@ -46,6 +52,7 @@ func main() {
 		fmt.Printf("Phantom-X Client v%s\n", Version)
 		fmt.Printf("  Build: %s\n", BuildTime)
 		fmt.Printf("  Commit: %s\n", GitCommit)
+		fmt.Printf("  Features: uTLS, Argo Tunnel, CF Optimize\n")
 		return
 	}
 
@@ -55,6 +62,7 @@ func main() {
 		cfg = config.DefaultClientConfig()
 	}
 
+	// 命令行参数覆盖配置
 	if *serverAddr != "" {
 		cfg.Server = *serverAddr
 	}
@@ -67,8 +75,23 @@ func main() {
 	if *insecure {
 		cfg.Insecure = true
 	}
-	if *noECH {
-		cfg.EnableECH = false
+	if *noUTLS {
+		cfg.EnableUTLS = false
+	}
+	if *fingerprint != "" {
+		cfg.Fingerprint = *fingerprint
+	}
+	if *enableArgo {
+		cfg.EnableArgo = true
+	}
+	if *argoMode != "" {
+		cfg.ArgoMode = *argoMode
+	}
+	if *cfOptimize {
+		cfg.EnableCFOptimize = true
+	}
+	if *cfIP != "" {
+		cfg.PreferredCFIP = *cfIP
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -81,23 +104,77 @@ func main() {
 		cfg.ClientID = uuid.NewString()
 	}
 
-	var echStopCh chan struct{}
-	if cfg.EnableECH && !cfg.Insecure {
-		plog.Info("Preparing ECH...")
-		if err := ech.Prepare(cfg.ECHDomain, cfg.ECHDns); err != nil {
-			plog.Warn("ECH prepare failed, falling back to TLS: %v", err)
-			cfg.EnableECH = false
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// ==================== 初始化 Argo 隧道 ====================
+	var argoTunnel *argo.Tunnel
+	var cfOptimizer *argo.CFOptimizer
+	var effectiveServerURL string = cfg.Server
+	var usingArgo bool
+
+	if cfg.EnableArgo || cfg.ArgoMode == "always" || cfg.ArgoMode == "fallback" {
+		plog.Info("[Argo] 初始化 Argo 隧道支持...")
+
+		// 确保 cloudflared 可用
+		cfdPath, err := argo.EnsureCloudflared(ctx, cfg.CloudflaredPath, cfg.AutoInstallCFD)
+		if err != nil {
+			if cfg.ArgoMode == "always" {
+				plog.Fatalf("[Argo] cloudflared 不可用: %v", err)
+			} else {
+				plog.Warn("[Argo] cloudflared 不可用: %v，将使用直连模式", err)
+			}
 		} else {
-			echStopCh = make(chan struct{})
-			ech.StartAutoRefresh(echStopCh)
-			plog.Debug("ECH auto-refresh started")
+			// 创建隧道
+			argoTunnel = argo.NewTunnel(&argo.TunnelConfig{
+				CloudflaredPath: cfdPath,
+				LocalPort:       cfg.ArgoLocalPort,
+				Protocol:        "https",
+				NoTLSVerify:     true,
+			})
+
+			// always 模式立即启动
+			if cfg.ArgoMode == "always" {
+				domain, err := argoTunnel.Start(ctx)
+				if err != nil {
+					plog.Fatalf("[Argo] 隧道启动失败: %v", err)
+				}
+				effectiveServerURL = fmt.Sprintf("wss://%s%s", domain, getWSPath(cfg.Server))
+				usingArgo = true
+				plog.Info("[Argo] 使用隧道域名: %s", domain)
+			}
 		}
 	}
 
+	// ==================== 初始化 CF 优选 ====================
+	if cfg.EnableCFOptimize && argoTunnel != nil {
+		cfOptimizer = argo.NewCFOptimizer(&argo.CFOptimizerConfig{
+			TestCount:   cfg.CFOptimizeCount,
+			Concurrency: cfg.CFOptimizeConcurrency,
+			Timeout:     3 * time.Second,
+		})
+
+		// 如果手动指定了 IP
+		if cfg.PreferredCFIP != "" {
+			cfOptimizer.SetOptimalIP(cfg.PreferredCFIP)
+		} else if usingArgo {
+			// Argo 模式下执行优选
+			plog.Info("[CFOptimize] 执行 Cloudflare IP 优选...")
+			if ip, latency, err := cfOptimizer.FindOptimalIP(ctx); err == nil && ip != "" {
+				plog.Info("[CFOptimize] 最优 IP: %s (延迟: %v)", ip, latency)
+			}
+
+			// 启动定期优选
+			cfOptimizer.StartAutoRefresh(ctx, cfg.CFOptimizeInterval)
+		}
+	}
+
+	// ==================== 创建流管理器 ====================
 	streamMgr := stream.NewManager()
 
+	// ==================== 创建连接池配置 ====================
 	poolCfg := &pool.Config{
-		ServerURL:         cfg.Server,
+		ServerURL:         effectiveServerURL,
 		Token:             cfg.Token,
 		ClientID:          cfg.ClientID,
 		Insecure:          cfg.Insecure,
@@ -108,21 +185,26 @@ func main() {
 		PingInterval:      30 * time.Second,
 		ReconnectDelay:    time.Second,
 		MaxBackoff:        30 * time.Second,
-		EnableECH:         cfg.EnableECH,
-		ECHDomain:         cfg.ECHDomain,
-		ECHDns:            cfg.ECHDns,
+		EnableUTLS:        cfg.EnableUTLS,
+		Fingerprint:       cfg.Fingerprint,
 		EnablePadding:     cfg.EnablePadding,
 		PaddingMinSize:    cfg.PaddingMinSize,
 		PaddingMaxSize:    cfg.PaddingMaxSize,
 		PaddingDistribute: cfg.PaddingDistribution,
+		
+		// Argo 相关
+		ArgoTunnel:        argoTunnel,
+		CFOptimizer:       cfOptimizer,
+		ArgoFallback:      cfg.ArgoMode == "fallback" || cfg.ArgoMode == "auto",
+		OriginalServerURL: cfg.Server,
 	}
 
 	connPool := pool.NewConnPool(poolCfg)
 
-	// 创建 SOCKS5 服务器（需要先创建，以便在 frameHandler 中使用）
+	// 创建 SOCKS5 服务器
 	socks5Server := socks5.NewServer(cfg, streamMgr)
 
-	// 设置帧处理器，传入 socks5Server 以处理 UDP 响应
+	// 设置帧处理器
 	connPool.SetFrameHandler(func(connID int, streamID uint32, cmd byte, payload []byte) {
 		handleServerFrame(streamMgr, socks5Server, connID, streamID, cmd, payload)
 	})
@@ -156,26 +238,33 @@ func main() {
 		plog.Fatalf("Start SOCKS5 failed: %v", err)
 	}
 
-	printBanner(cfg)
+	printBanner(cfg, usingArgo, argoTunnel, cfOptimizer)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
 
 	plog.Info("Shutting down...")
-	if echStopCh != nil {
-		close(echStopCh)
-	}
+	
+	// 清理
 	socks5Server.Stop()
 	connPool.Stop()
 	streamMgr.CloseAll()
+	
+	if argoTunnel != nil {
+		argoTunnel.Stop()
+	}
+	if cfOptimizer != nil {
+		cfOptimizer.Stop()
+	}
+
+	cancel()
 
 	if *showStats {
 		printStats()
 	}
 }
 
-// handleServerFrame 处理服务端返回的帧
 func handleServerFrame(mgr *stream.Manager, socks5Srv *socks5.Server, connID int, streamID uint32, cmd byte, payload []byte) {
 	switch cmd {
 	case proto.CmdConnStatus:
@@ -200,12 +289,10 @@ func handleServerFrame(mgr *stream.Manager, socks5Srv *socks5.Server, connID int
 		}
 		
 		if st.IsUDP {
-			// UDP 响应：通过 SOCKS5 服务器发送给客户端
 			if err := socks5Srv.HandleUDPResponse(streamID, payload); err != nil {
 				plog.Debug("[Client] Failed to handle UDP response for stream %d: %v", streamID, err)
 			}
 		} else {
-			// TCP 数据：写入流的数据通道
 			if err := st.SendData(payload); err != nil {
 				plog.Debug("[Client] Failed to send data to stream %d: %v", streamID, err)
 			}
@@ -213,21 +300,16 @@ func handleServerFrame(mgr *stream.Manager, socks5Srv *socks5.Server, connID int
 
 	case proto.CmdClose:
 		plog.Debug("[Client] Stream %d closed by server", streamID)
-		
-		// 检查是否是 UDP 流，如果是则清理 UDP 会话
 		st := mgr.Get(streamID)
 		if st != nil && st.IsUDP {
 			socks5Srv.HandleUDPClose(streamID)
 		}
-		
 		mgr.Unregister(streamID)
 
 	case proto.CmdPing:
-		// 服务端发来的 Ping，可以忽略或记录
 		plog.Debug("[Client] Received ping from server")
 
 	case proto.CmdPong:
-		// Pong 响应，通常由底层连接处理
 		plog.Debug("[Client] Received pong from server")
 
 	default:
@@ -235,29 +317,84 @@ func handleServerFrame(mgr *stream.Manager, socks5Srv *socks5.Server, connID int
 	}
 }
 
-func printBanner(cfg *config.ClientConfig) {
+func getWSPath(serverURL string) string {
+	// 从 URL 中提取 path
+	if idx := len("wss://"); idx < len(serverURL) {
+		rest := serverURL[idx:]
+		if slashIdx := indexOf(rest, '/'); slashIdx >= 0 {
+			return rest[slashIdx:]
+		}
+	}
+	return "/ws"
+}
+
+func indexOf(s string, c byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+
+func printBanner(cfg *config.ClientConfig, usingArgo bool, tunnel *argo.Tunnel, optimizer *argo.CFOptimizer) {
 	fmt.Println()
-	fmt.Println("╔══════════════════════════════════════════════════════════╗")
-	fmt.Println("║              Phantom-X Client v1.0                       ║")
-	fmt.Println("║              高性能 · 抗探测 · 0-RTT                      ║")
-	fmt.Println("╠══════════════════════════════════════════════════════════╣")
-	fmt.Printf("║  服务器: %-47s ║\n", cfg.Server)
+	fmt.Println("╔══════════════════════════════════════════════════════════════╗")
+	fmt.Println("║              Phantom-X Client v1.1                           ║")
+	fmt.Println("║              高性能 · 抗探测 · uTLS · Argo                    ║")
+	fmt.Println("╠══════════════════════════════════════════════════════════════╣")
+	fmt.Printf("║  服务器: %-47s ║\n", truncateString(cfg.Server, 47))
 	fmt.Printf("║  SOCKS5: %-47s ║\n", cfg.Socks5Listen)
 	fmt.Printf("║  连接数: %-47d ║\n", cfg.NumConnections)
-	echStatus := "已禁用"
-	if cfg.EnableECH {
-		echStatus = "已启用"
+	
+	// uTLS 状态
+	utlsStatus := "已禁用"
+	if cfg.EnableUTLS {
+		utlsStatus = fmt.Sprintf("已启用 (%s)", cfg.Fingerprint)
 	}
-	fmt.Printf("║  ECH:    %-47s ║\n", echStatus)
+	fmt.Printf("║  uTLS:   %-47s ║\n", utlsStatus)
+	
+	// Argo 状态
+	argoStatus := "已禁用"
+	if usingArgo && tunnel != nil {
+		domain := tunnel.GetDomain()
+		if domain != "" {
+			argoStatus = fmt.Sprintf("已启用 (%s)", truncateString(domain, 30))
+		} else {
+			argoStatus = "已启用 (等待域名...)"
+		}
+	} else if cfg.ArgoMode == "fallback" {
+		argoStatus = "回落模式 (待命)"
+	}
+	fmt.Printf("║  Argo:   %-47s ║\n", argoStatus)
+	
+	// CF 优选状态
+	if optimizer != nil {
+		ip, latency := optimizer.GetOptimalIP()
+		if ip != "" {
+			cfStatus := fmt.Sprintf("%s (%v)", ip, latency.Round(time.Millisecond))
+			fmt.Printf("║  优选IP: %-47s ║\n", cfStatus)
+		}
+	}
+	
+	// Padding 状态
 	paddingStatus := "已禁用"
 	if cfg.EnablePadding {
-		paddingStatus = "已启用"
+		paddingStatus = fmt.Sprintf("已启用 (%s)", cfg.PaddingDistribution)
 	}
 	fmt.Printf("║  Padding: %-46s ║\n", paddingStatus)
-	fmt.Println("╠══════════════════════════════════════════════════════════╣")
-	fmt.Println("║  按 Ctrl+C 停止  |  --stats 查看统计                     ║")
-	fmt.Println("╚══════════════════════════════════════════════════════════╝")
+	
+	fmt.Println("╠══════════════════════════════════════════════════════════════╣")
+	fmt.Println("║  按 Ctrl+C 停止  |  --stats 查看统计                         ║")
+	fmt.Println("╚══════════════════════════════════════════════════════════════╝")
 	fmt.Println()
+}
+
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
 }
 
 func printStats() {
