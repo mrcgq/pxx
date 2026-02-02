@@ -353,7 +353,7 @@ func (p *ConnPool) maintainConnection(id int) {
 		p.conns[id] = nil
 		p.connsMu.Unlock()
 
-		conn.Close()
+		_ = conn.Close()
 		metrics.DecrActiveConnections()
 		metrics.IncrReconnectCount()
 		plog.Info("[Pool] Connection %d closed, reconnecting...", id)
@@ -390,7 +390,7 @@ func (p *ConnPool) handleConnectFailure(err error) {
 
 	if mode == ModeDirect && p.cfg.ArgoFallback && p.cfg.ArgoTunnel != nil {
 		failures := atomic.AddInt32(&p.directFailures, 1)
-		
+
 		if failures >= MaxDirectFailures {
 			plog.Warn("[Pool] 直连失败 %d 次，切换到 Argo 模式", failures)
 			p.switchToArgo()
@@ -500,7 +500,7 @@ func (p *ConnPool) probeDirectConnection() bool {
 		plog.Debug("[Pool] 直连探测失败: %v", err)
 		return false
 	}
-	defer conn.Close()
+	_ = conn.Close()
 
 	plog.Debug("[Pool] 直连探测成功")
 	return true
@@ -881,7 +881,7 @@ func (w *PoolConn) Close() {
 			time.Now().Add(time.Second),
 		)
 
-		w.conn.Close()
+		_ = w.conn.Close()
 	})
 }
 
