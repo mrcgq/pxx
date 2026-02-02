@@ -1,5 +1,3 @@
-//internal/ech/ech.go
-
 package ech
 
 import (
@@ -8,7 +6,6 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -142,14 +139,14 @@ func queryDNSUDP(domain, dnsServer string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	if err := conn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
 		return "", err
 	}
 
 	if _, err := conn.Write(query); err != nil {
-		return "", fmt.Errorf("write DNS query: %w", err)
+		return "", err
 	}
 
 	response := make([]byte, 4096)
@@ -181,7 +178,7 @@ func queryDoH(domain, dohURL string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -278,8 +275,3 @@ func parseHTTPSRecord(data []byte) string {
 	}
 	return ""
 }
-
-
-
-
-
