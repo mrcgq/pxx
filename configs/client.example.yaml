@@ -1,9 +1,7 @@
-
-
-//configs/client.example.yaml
-
-
-# Phantom-X 客户端配置
+# ═══════════════════════════════════════════════════════════════
+# Phantom-X 客户端配置 v1.1
+# 支持: uTLS 指纹 + Argo 临时隧道 + Cloudflare IP 优选
+# ═══════════════════════════════════════════════════════════════
 
 # 服务器地址
 server: "wss://your-server.com:443/ws"
@@ -14,32 +12,76 @@ token: "your-secret-token-here"
 # 客户端 ID (留空自动生成)
 client_id: ""
 
-# SOCKS5 代理
+# ==================== SOCKS5 代理 ====================
 socks5_listen: ":1080"
 socks5_auth: ""  # 格式: user:pass (留空不验证)
 
-# 连接池
+# ==================== 连接池 ====================
 num_connections: 3
 write_timeout: 10s
 read_timeout: 60s
 
-# TLS 设置
+# ==================== TLS 设置 ====================
 insecure: false  # 是否跳过证书验证
 
-# ECH (加密客户端握手)
-enable_ech: true
+# ==================== uTLS 指纹伪装 ====================
+# 强烈建议开启，让 TLS 握手看起来像真实浏览器
+enable_utls: true
+# 指纹类型: chrome, firefox, safari, ios, android, edge, 360, qq, random
+fingerprint: "chrome"
+
+# ==================== ECH (加密客户端握手) ====================
+# 注意: ECH 和 uTLS 不能同时使用，优先使用 uTLS
+enable_ech: false
 ech_domain: "cloudflare-ech.com"
 ech_dns: "https://doh.pub/dns-query"
 
-# 流量混淆
+# ==================== Argo 临时隧道 ====================
+# 当直连失败时，自动通过 Cloudflare 隧道中转
+enable_argo: false
+
+# Argo 模式:
+#   - "auto": 智能切换 (默认直连，失败后切换到 Argo)
+#   - "always": 始终使用 Argo 隧道
+#   - "fallback": 仅在直连失败时使用 (推荐)
+argo_mode: "fallback"
+
+# 隧道本地端口 (0 = 随机)
+argo_local_port: 0
+
+# cloudflared 可执行文件路径 (留空自动查找)
+cloudflared_path: ""
+
+# 自动安装 cloudflared (如果未找到)
+auto_install_cfd: true
+
+# ==================== Cloudflare IP 优选 ====================
+# 当使用 Argo 隧道时，自动选择延迟最低的 Cloudflare IP
+enable_cf_optimize: true
+
+# 测试 IP 数量 (越多越准确，但耗时更长)
+cf_optimize_count: 200
+
+# 优选刷新间隔
+cf_optimize_interval: 30m
+
+# 并发测试数
+cf_optimize_concurrency: 50
+
+# 手动指定 Cloudflare IP (跳过自动优选)
+preferred_cf_ip: ""
+
+# ==================== 流量混淆 ====================
 enable_padding: true
 padding_min_size: 64
 padding_max_size: 256
-padding_distribution: "mimicry"  # uniform, normal, mimicry
+# 填充分布: uniform (均匀), normal (正态), mimicry (模拟真实流量)
+padding_distribution: "mimicry"
 
-# IP 策略: "", "4", "6", "4,6", "6,4"
+# ==================== IP 策略 ====================
+# 空 = 自动, "4" = 仅 IPv4, "6" = 仅 IPv6, "4,6" = 优先 IPv4, "6,4" = 优先 IPv6
 ip_strategy: ""
 
-# 日志级别
+# ==================== 日志 ====================
+# 级别: debug, info, warn, error
 log_level: "info"
-
