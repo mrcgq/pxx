@@ -103,15 +103,15 @@ func (s *Stream) Close() {
 		}
 		s.mu.Unlock()
 
-		// 排空数据通道
+		// 排空数据通道 - 使用标签化的 break
+	drainLoop:
 		for {
 			select {
 			case <-s.DataCh:
 			default:
-				goto done
+				break drainLoop
 			}
 		}
-	done:
 
 		if s.OnClose != nil {
 			s.OnClose(s.ID)
