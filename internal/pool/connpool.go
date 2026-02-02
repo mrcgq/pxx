@@ -241,7 +241,6 @@ func (p *ConnPool) Start() error {
 		go p.maintainConnection(i)
 	}
 
-	// 启动直连探测（如果使用 Argo 回落模式）
 	if p.cfg.ArgoFallback && p.cfg.ArgoTunnel != nil {
 		p.wg.Add(1)
 		go p.directProbeLoop()
@@ -266,7 +265,6 @@ func (p *ConnPool) GetMode() ConnectionMode {
 	return ConnectionMode(atomic.LoadInt32(&p.mode))
 }
 
-// maintainConnection 维护单个连接
 func (p *ConnPool) maintainConnection(id int) {
 	defer p.wg.Done()
 
@@ -279,15 +277,12 @@ func (p *ConnPool) maintainConnection(id int) {
 		default:
 		}
 
-		// 根据当前模式选择服务器地址
 		serverURL, optimalIP := p.getConnectionTarget()
 
-		// 拨号
 		var conn *websocket.Conn
 		var err error
 
 		if optimalIP != "" {
-			// 使用优选 IP
 			conn, err = p.dialer.DialWithOptimalIP(context.Background(), serverURL, p.cfg.ClientID, optimalIP)
 		} else {
 			conn, err = p.dialer.Dial(serverURL, p.cfg.ClientID)
@@ -297,7 +292,6 @@ func (p *ConnPool) maintainConnection(id int) {
 			plog.Debug("[Pool] Connection %d dial failed: %v", id, err)
 			metrics.IncrConnectError()
 
-			// 处理连接失败
 			p.handleConnectFailure(err)
 
 			select {
@@ -313,7 +307,6 @@ func (p *ConnPool) maintainConnection(id int) {
 			continue
 		}
 
-		// 连接成功
 		backoff = p.cfg.ReconnectDelay
 		p.handleConnectSuccess()
 
@@ -360,7 +353,6 @@ func (p *ConnPool) maintainConnection(id int) {
 	}
 }
 
-// getConnectionTarget 获取当前应该连接的目标
 func (p *ConnPool) getConnectionTarget() (serverURL string, optimalIP string) {
 	mode := p.GetMode()
 
@@ -373,7 +365,6 @@ func (p *ConnPool) getConnectionTarget() (serverURL string, optimalIP string) {
 			serverURL = p.cfg.ServerURL
 		}
 
-		// 获取优选 IP
 		if p.cfg.CFOptimizer != nil {
 			optimalIP, _ = p.cfg.CFOptimizer.GetOptimalIP()
 		}
@@ -384,7 +375,6 @@ func (p *ConnPool) getConnectionTarget() (serverURL string, optimalIP string) {
 	return serverURL, optimalIP
 }
 
-// handleConnectFailure 处理连接失败
 func (p *ConnPool) handleConnectFailure(err error) {
 	mode := p.GetMode()
 
@@ -398,7 +388,6 @@ func (p *ConnPool) handleConnectFailure(err error) {
 	}
 }
 
-// handleConnectSuccess 处理连接成功
 func (p *ConnPool) handleConnectSuccess() {
 	mode := p.GetMode()
 
@@ -407,7 +396,6 @@ func (p *ConnPool) handleConnectSuccess() {
 	}
 }
 
-// switchToArgo 切换到 Argo 模式
 func (p *ConnPool) switchToArgo() {
 	if p.cfg.ArgoTunnel == nil {
 		return
@@ -417,10 +405,9 @@ func (p *ConnPool) switchToArgo() {
 	defer p.modeMu.Unlock()
 
 	if ConnectionMode(atomic.LoadInt32(&p.mode)) == ModeArgo {
-		return // 已经是 Argo 模式
+		return
 	}
 
-	// 启动隧道
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -430,11 +417,9 @@ func (p *ConnPool) switchToArgo() {
 		return
 	}
 
-	// 构建 Argo 服务器 URL
 	wsPath := getWSPath(p.cfg.OriginalServerURL)
 	p.argoServerURL = fmt.Sprintf("wss://%s%s", domain, wsPath)
 
-	// 执行 CF 优选
 	if p.cfg.CFOptimizer != nil {
 		go func() {
 			if ip, latency, err := p.cfg.CFOptimizer.FindOptimalIP(context.Background()); err == nil && ip != "" {
@@ -447,7 +432,6 @@ func (p *ConnPool) switchToArgo() {
 	plog.Info("[Pool] 已切换到 Argo 模式: %s", domain)
 }
 
-// switchToDirect 切换回直连模式
 func (p *ConnPool) switchToDirect() {
 	p.modeMu.Lock()
 	defer p.modeMu.Unlock()
@@ -462,13 +446,11 @@ func (p *ConnPool) switchToDirect() {
 
 	plog.Info("[Pool] 已切换回直连模式")
 
-	// 停止 Argo 隧道
 	if p.cfg.ArgoTunnel != nil {
 		go p.cfg.ArgoTunnel.Stop()
 	}
 }
 
-// directProbeLoop 定期探测直连是否恢复
 func (p *ConnPool) directProbeLoop() {
 	defer p.wg.Done()
 
@@ -490,7 +472,6 @@ func (p *ConnPool) directProbeLoop() {
 	}
 }
 
-// probeDirectConnection 探测直连是否可用
 func (p *ConnPool) probeDirectConnection() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -506,7 +487,6 @@ func (p *ConnPool) probeDirectConnection() bool {
 	return true
 }
 
-// getWSPath 从 URL 提取 WebSocket 路径
 func getWSPath(serverURL string) string {
 	u, err := url.Parse(serverURL)
 	if err != nil {
@@ -633,20 +613,14 @@ func (w *PoolConn) writeLoop() {
 	defer func() {
 		flush()
 
-		for {
-			select {
-			case job, ok := <-w.writeCh:
-				if !ok {
-					return
+		// 排空写通道
+		for len(w.writeCh) > 0 {
+			job := <-w.writeCh
+			if job.Done != nil {
+				select {
+				case job.Done <- ErrConnClosed:
+				default:
 				}
-				if job.Done != nil {
-					select {
-					case job.Done <- ErrConnClosed:
-					default:
-					}
-				}
-			default:
-				return
 			}
 		}
 	}()
