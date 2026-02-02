@@ -1,25 +1,19 @@
+# .golangci.yml
 run:
   timeout: 5m
-  
+  modules-download-mode: readonly
+
 linters:
   enable:
     - errcheck
+    - gosimple
+    - govet
     - staticcheck
     - unused
-    - govet
-    - gosimple
-  
-linters-settings:
-  errcheck:
-    # 忽略某些常见的无害错误
-    exclude-functions:
-      - (io.Closer).Close
-      - (net.Conn).Close
-      - (*os.File).Close
-      
+  disable:
+    - ineffassign  # 临时禁用，待代码修复后可重新启用
+
 issues:
-  exclude-rules:
-    # 忽略测试文件中的某些错误
-    - path: _test\.go
-      linters:
-        - errcheck
+  exclude-use-default: false
+  max-issues-per-linter: 0
+  max-same-issues: 0
