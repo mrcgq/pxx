@@ -65,7 +65,6 @@ func NewDialer(cfg *config.ClientConfig) *Dialer {
 	return d
 }
 
-// getClientHelloID 根据配置获取 uTLS 指纹
 func (d *Dialer) getClientHelloID() utls.ClientHelloID {
 	switch strings.ToLower(d.cfg.Fingerprint) {
 	case "chrome":
@@ -95,7 +94,6 @@ func (d *Dialer) Dial(serverURL string, clientID string) (*websocket.Conn, error
 	return d.DialWithContext(context.Background(), serverURL, clientID)
 }
 
-// DialWithContext 使用 uTLS 建立 WebSocket 连接
 func (d *Dialer) DialWithContext(ctx context.Context, serverURL string, clientID string) (*websocket.Conn, error) {
 	u, err := url.Parse(serverURL)
 	if err != nil {
@@ -115,20 +113,16 @@ func (d *Dialer) DialWithContext(ctx context.Context, serverURL string, clientID
 		EnableCompression: false,
 	}
 
-	// 设置 Token
 	if d.cfg.Token != "" {
 		signedToken := GenerateSignedToken(d.cfg.Token, clientID)
 		dialer.Subprotocols = []string{signedToken}
 	}
 
-	// 根据配置决定使用 uTLS 还是标准 TLS
 	if u.Scheme == "wss" && d.cfg.EnableUTLS && !d.cfg.Insecure {
-		// 使用 uTLS
 		dialer.NetDialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 			return d.dialWithUTLS(ctx, network, addr, host)
 		}
 	} else if u.Scheme == "wss" {
-		// 使用标准 TLS
 		dialer.TLSClientConfig = &tls.Config{
 			ServerName:         host,
 			InsecureSkipVerify: d.cfg.Insecure,
@@ -154,7 +148,6 @@ func (d *Dialer) DialWithContext(ctx context.Context, serverURL string, clientID
 	return conn, nil
 }
 
-// DialWithOptimalIP 使用优选 IP 和自定义 SNI 建立连接
 func (d *Dialer) DialWithOptimalIP(ctx context.Context, serverURL string, clientID string, optimalIP string) (*websocket.Conn, error) {
 	u, err := url.Parse(serverURL)
 	if err != nil {
@@ -183,7 +176,6 @@ func (d *Dialer) DialWithOptimalIP(ctx context.Context, serverURL string, client
 		dialer.Subprotocols = []string{signedToken}
 	}
 
-	// 使用优选 IP + SNI (host)
 	targetAddr := net.JoinHostPort(optimalIP, port)
 
 	dialer.NetDialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -201,16 +193,13 @@ func (d *Dialer) DialWithOptimalIP(ctx context.Context, serverURL string, client
 	return conn, nil
 }
 
-// dialWithUTLS 使用 uTLS 建立 TLS 连接
 func (d *Dialer) dialWithUTLS(ctx context.Context, network, addr, sni string) (net.Conn, error) {
-	// 建立 TCP 连接
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
 	tcpConn, err := dialer.DialContext(ctx, network, addr)
 	if err != nil {
 		return nil, fmt.Errorf("TCP dial: %w", err)
 	}
 
-	// 创建 uTLS 连接
 	uConfig := &utls.Config{
 		ServerName:         sni,
 		InsecureSkipVerify: d.cfg.Insecure,
@@ -219,7 +208,6 @@ func (d *Dialer) dialWithUTLS(ctx context.Context, network, addr, sni string) (n
 
 	uConn := utls.UClient(tcpConn, uConfig, d.fingerprint)
 
-	// 执行握手
 	if err := uConn.HandshakeContext(ctx); err != nil {
 		_ = tcpConn.Close()
 		return nil, fmt.Errorf("TLS handshake: %w", err)
@@ -228,7 +216,6 @@ func (d *Dialer) dialWithUTLS(ctx context.Context, network, addr, sni string) (n
 	return uConn, nil
 }
 
-// GenerateSignedToken 生成签名的认证令牌
 func GenerateSignedToken(secret, clientID string) string {
 	timestamp := time.Now().Unix()
 	message := fmt.Sprintf("%s:%d", clientID, timestamp)
@@ -240,7 +227,7 @@ func GenerateSignedToken(secret, clientID string) string {
 	return fmt.Sprintf("%s:%d:%s", clientID, timestamp, signature)
 }
 
-// ==================== WebSocket 升级器 (服务端) ====================
+// ==================== WebSocket 升级器 ====================
 
 type Upgrader struct {
 	cfg      *config.ServerConfig
@@ -385,7 +372,7 @@ func IsTimeoutError(err error) bool {
 	return false
 }
 
-// ==================== WSConn 完整实现 ====================
+// ==================== WSConn ====================
 
 type WSConn struct {
 	ID        int
