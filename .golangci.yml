@@ -10,6 +10,7 @@ linters:
     - govet
     - staticcheck
     - unused
+    - ineffassign
 
 issues:
   exclude-use-default: false
