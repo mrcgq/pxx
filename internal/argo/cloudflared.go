@@ -131,7 +131,7 @@ func InstallCloudflared(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("download: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("download failed: HTTP %d", resp.StatusCode)
@@ -142,11 +142,15 @@ func InstallCloudflared(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("create file: %w", err)
 	}
-	defer out.Close()
 
 	written, err := io.Copy(out, resp.Body)
 	if err != nil {
+		_ = out.Close()
 		return "", fmt.Errorf("write file: %w", err)
+	}
+
+	if err := out.Close(); err != nil {
+		return "", fmt.Errorf("close file: %w", err)
 	}
 
 	plog.Info("[Argo] cloudflared 下载完成: %s (%.2f MB)", installPath, float64(written)/1024/1024)
