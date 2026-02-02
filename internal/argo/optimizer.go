@@ -44,14 +44,14 @@ type IPTestResult struct {
 // ==================== CF 优选器 ====================
 
 type CFOptimizer struct {
-	candidateIPs []string
-	optimalIP    string
+	candidateIPs   []string
+	optimalIP      string
 	optimalLatency time.Duration
-	testDomain   string
-	testPort     string
-	concurrency  int
-	timeout      time.Duration
-	
+	testDomain     string
+	testPort       string
+	concurrency    int
+	timeout        time.Duration
+
 	mu           sync.RWMutex
 	lastOptimize time.Time
 	testing      int32
@@ -225,7 +225,7 @@ func (o *CFOptimizer) FindOptimalIP(ctx context.Context) (string, time.Duration,
 	})
 
 	best := successResults[0]
-	
+
 	o.mu.Lock()
 	o.optimalIP = best.IP
 	o.optimalLatency = best.Latency
@@ -261,14 +261,14 @@ func (o *CFOptimizer) testIP(ctx context.Context, ip string) (time.Duration, boo
 	if err != nil {
 		return 0, false
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// TLS 握手
 	tlsConn := tls.Client(conn, &tls.Config{
 		ServerName:         o.testDomain,
 		InsecureSkipVerify: true, // 只测延迟，不验证证书
 	})
-	
+
 	if err := tlsConn.SetDeadline(time.Now().Add(o.timeout)); err != nil {
 		return 0, false
 	}
