@@ -1,6 +1,3 @@
-
-
-//pkg/config/config.go
 package config
 
 import (
@@ -22,13 +19,11 @@ type ServerConfig struct {
 	Token    string `yaml:"token"`
 	WSPath   string `yaml:"ws_path"`
 
-	// 性能调优
 	MaxStreamsPerConn int           `yaml:"max_streams_per_conn"`
 	ReadTimeout       time.Duration `yaml:"read_timeout"`
 	WriteTimeout      time.Duration `yaml:"write_timeout"`
 	IdleTimeout       time.Duration `yaml:"idle_timeout"`
 
-	// 日志
 	LogLevel string `yaml:"log_level"`
 }
 
@@ -63,7 +58,6 @@ func LoadServerConfig(path string) (*ServerConfig, error) {
 	return cfg, nil
 }
 
-// Validate 验证服务端配置
 func (c *ServerConfig) Validate() error {
 	if c.Listen == "" {
 		c.Listen = ":443"
@@ -76,7 +70,6 @@ func (c *ServerConfig) Validate() error {
 		return errors.New("TLS key file is required")
 	}
 
-	// 检查证书文件是否存在
 	if _, err := os.Stat(c.CertFile); os.IsNotExist(err) {
 		return fmt.Errorf("certificate file not found: %s", c.CertFile)
 	}
@@ -87,8 +80,6 @@ func (c *ServerConfig) Validate() error {
 	if c.WSPath == "" {
 		c.WSPath = "/ws"
 	}
-
-	// 确保路径以 / 开头
 	if c.WSPath[0] != '/' {
 		c.WSPath = "/" + c.WSPath
 	}
@@ -122,7 +113,7 @@ type ClientConfig struct {
 
 	// SOCKS5
 	Socks5Listen string `yaml:"socks5_listen"`
-	Socks5Auth   string `yaml:"socks5_auth"` // user:pass
+	Socks5Auth   string `yaml:"socks5_auth"`
 
 	// 连接池
 	NumConnections int           `yaml:"num_connections"`
@@ -132,19 +123,37 @@ type ClientConfig struct {
 	// TLS
 	Insecure bool `yaml:"insecure"`
 
+	// uTLS 指纹伪装
+	EnableUTLS  bool   `yaml:"enable_utls"`
+	Fingerprint string `yaml:"fingerprint"` // chrome, firefox, safari, ios, android, random
+
 	// ECH
 	EnableECH bool   `yaml:"enable_ech"`
 	ECHDomain string `yaml:"ech_domain"`
 	ECHDns    string `yaml:"ech_dns"`
 
+	// Argo 隧道
+	EnableArgo        bool   `yaml:"enable_argo"`
+	ArgoMode          string `yaml:"argo_mode"`           // "auto", "always", "fallback"
+	ArgoLocalPort     int    `yaml:"argo_local_port"`     // 隧道本地端口，0=随机
+	CloudflaredPath   string `yaml:"cloudflared_path"`    // cloudflared 路径
+	AutoInstallCFD    bool   `yaml:"auto_install_cfd"`    // 自动安装 cloudflared
+
+	// Cloudflare IP 优选
+	EnableCFOptimize    bool          `yaml:"enable_cf_optimize"`
+	CFOptimizeCount     int           `yaml:"cf_optimize_count"`
+	CFOptimizeInterval  time.Duration `yaml:"cf_optimize_interval"`
+	CFOptimizeConcurrency int         `yaml:"cf_optimize_concurrency"`
+	PreferredCFIP       string        `yaml:"preferred_cf_ip"` // 手动指定
+
 	// Padding 配置
 	EnablePadding       bool   `yaml:"enable_padding"`
 	PaddingMinSize      int    `yaml:"padding_min_size"`
 	PaddingMaxSize      int    `yaml:"padding_max_size"`
-	PaddingDistribution string `yaml:"padding_distribution"` // uniform, normal, mimicry
+	PaddingDistribution string `yaml:"padding_distribution"`
 
 	// IP 策略
-	IPStrategy string `yaml:"ip_strategy"` // 4, 6, 4,6, 6,4
+	IPStrategy string `yaml:"ip_strategy"`
 
 	// 日志
 	LogLevel string `yaml:"log_level"`
@@ -156,9 +165,19 @@ func DefaultClientConfig() *ClientConfig {
 		NumConnections:      3,
 		WriteTimeout:        10 * time.Second,
 		ReadTimeout:         60 * time.Second,
-		EnableECH:           true,
+		EnableUTLS:          true,
+		Fingerprint:         "chrome",
+		EnableECH:           false, // 默认关闭，uTLS 优先
 		ECHDomain:           "cloudflare-ech.com",
 		ECHDns:              "https://doh.pub/dns-query",
+		EnableArgo:          false,
+		ArgoMode:            "fallback", // 默认回落模式
+		ArgoLocalPort:       0,
+		AutoInstallCFD:      true,
+		EnableCFOptimize:    true,
+		CFOptimizeCount:     200,
+		CFOptimizeInterval:  30 * time.Minute,
+		CFOptimizeConcurrency: 50,
 		EnablePadding:       true,
 		PaddingMinSize:      64,
 		PaddingMaxSize:      256,
@@ -185,7 +204,6 @@ func LoadClientConfig(path string) (*ClientConfig, error) {
 	return cfg, nil
 }
 
-// Validate 验证客户端配置
 func (c *ClientConfig) Validate() error {
 	if c.Server == "" {
 		return errors.New("server address is required")
@@ -226,6 +244,36 @@ func (c *ClientConfig) Validate() error {
 		c.ReadTimeout = 60 * time.Second
 	}
 
+	// uTLS 指纹验证
+	switch c.Fingerprint {
+	case "chrome", "firefox", "safari", "ios", "android", "edge", "360", "qq", "random", "":
+		// 有效
+	default:
+		c.Fingerprint = "chrome"
+	}
+
+	// Argo 模式验证
+	switch c.ArgoMode {
+	case "auto", "always", "fallback", "":
+		// 有效
+	default:
+		c.ArgoMode = "fallback"
+	}
+
+	if c.CFOptimizeCount < 10 {
+		c.CFOptimizeCount = 10
+	}
+	if c.CFOptimizeCount > 1000 {
+		c.CFOptimizeCount = 1000
+	}
+
+	if c.CFOptimizeConcurrency < 10 {
+		c.CFOptimizeConcurrency = 10
+	}
+	if c.CFOptimizeConcurrency > 100 {
+		c.CFOptimizeConcurrency = 100
+	}
+
 	if c.PaddingMinSize < 0 {
 		c.PaddingMinSize = 64
 	}
@@ -233,7 +281,6 @@ func (c *ClientConfig) Validate() error {
 		c.PaddingMaxSize = c.PaddingMinSize + 192
 	}
 
-	// 验证 Padding 分布
 	switch c.PaddingDistribution {
 	case "uniform", "normal", "mimicry", "":
 		// 有效
@@ -241,7 +288,6 @@ func (c *ClientConfig) Validate() error {
 		c.PaddingDistribution = "mimicry"
 	}
 
-	// 验证 IP 策略
 	switch c.IPStrategy {
 	case "", "4", "6", "4,6", "6,4":
 		// 有效
@@ -251,5 +297,3 @@ func (c *ClientConfig) Validate() error {
 
 	return nil
 }
-
-
