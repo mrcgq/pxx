@@ -103,15 +103,16 @@ func (s *Stream) Close() {
 		}
 		s.mu.Unlock()
 
-		// 排空数据通道 - 使用标签化的 break
-	drainLoop:
-		for {
-			select {
-			case <-s.DataCh:
-			default:
-				break drainLoop
+		// 排空数据通道 - 使用立即执行的匿名函数避免 SA4011
+		func() {
+			for {
+				select {
+				case <-s.DataCh:
+				default:
+					return
+				}
 			}
-		}
+		}()
 
 		if s.OnClose != nil {
 			s.OnClose(s.ID)
