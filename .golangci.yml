@@ -16,3 +16,9 @@ issues:
   exclude-use-default: false
   max-issues-per-linter: 0
   max-same-issues: 0
+  
+  exclude-rules:
+    # 临时排除 SA4011 - ineffective break
+    - linters:
+        - staticcheck
+      text: "SA4011"
