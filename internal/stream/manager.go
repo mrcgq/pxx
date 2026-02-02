@@ -1,6 +1,3 @@
-
-
-//internal/stream/manager.go
 package stream
 
 import (
@@ -99,10 +96,10 @@ func (s *Stream) Close() {
 
 		s.mu.Lock()
 		if s.TCPConn != nil {
-			s.TCPConn.Close()
+			_ = s.TCPConn.Close()
 		}
 		if s.UDPConn != nil {
-			s.UDPConn.Close()
+			_ = s.UDPConn.Close()
 		}
 		s.mu.Unlock()
 
@@ -273,5 +270,3 @@ func (m *Manager) CleanupTimeout(timeout time.Duration) int {
 	})
 	return count
 }
-
-
