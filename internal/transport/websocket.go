@@ -52,7 +52,7 @@ type WriteJob struct {
 	Done     chan error
 }
 
-// ==================== WebSocket 拨号器 (重写) ====================
+// ==================== WebSocket 拨号器 ====================
 
 type Dialer struct {
 	cfg         *config.ClientConfig
@@ -106,16 +106,7 @@ func (d *Dialer) DialWithContext(ctx context.Context, serverURL string, clientID
 	q.Set("id", clientID)
 	u.RawQuery = q.Encode()
 
-	// 确定目标地址
 	host := u.Hostname()
-	port := u.Port()
-	if port == "" {
-		if u.Scheme == "wss" {
-			port = "443"
-		} else {
-			port = "80"
-		}
-	}
 
 	dialer := websocket.Dialer{
 		HandshakeTimeout:  10 * time.Second,
@@ -196,7 +187,6 @@ func (d *Dialer) DialWithOptimalIP(ctx context.Context, serverURL string, client
 	targetAddr := net.JoinHostPort(optimalIP, port)
 
 	dialer.NetDialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		// 直接连接优选 IP，但 SNI 使用原始域名
 		return d.dialWithUTLS(ctx, network, targetAddr, host)
 	}
 
