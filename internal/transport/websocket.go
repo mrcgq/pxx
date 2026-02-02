@@ -52,9 +52,6 @@ type WriteJob struct {
 	Done     chan error
 }
 
-// ==================== WSConn 结构体保持不变 ====================
-// (与原代码相同，省略)
-
 // ==================== WebSocket 拨号器 (重写) ====================
 
 type Dialer struct {
@@ -197,7 +194,7 @@ func (d *Dialer) DialWithOptimalIP(ctx context.Context, serverURL string, client
 
 	// 使用优选 IP + SNI (host)
 	targetAddr := net.JoinHostPort(optimalIP, port)
-	
+
 	dialer.NetDialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		// 直接连接优选 IP，但 SNI 使用原始域名
 		return d.dialWithUTLS(ctx, network, targetAddr, host)
@@ -234,7 +231,7 @@ func (d *Dialer) dialWithUTLS(ctx context.Context, network, addr, sni string) (n
 
 	// 执行握手
 	if err := uConn.HandshakeContext(ctx); err != nil {
-		tcpConn.Close()
+		_ = tcpConn.Close()
 		return nil, fmt.Errorf("TLS handshake: %w", err)
 	}
 
@@ -253,7 +250,7 @@ func GenerateSignedToken(secret, clientID string) string {
 	return fmt.Sprintf("%s:%d:%s", clientID, timestamp, signature)
 }
 
-// ==================== WebSocket 升级器 (服务端，保持不变) ====================
+// ==================== WebSocket 升级器 (服务端) ====================
 
 type Upgrader struct {
 	cfg      *config.ServerConfig
@@ -521,7 +518,7 @@ func (w *WSConn) Close() {
 				websocket.CloseMessage,
 				websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
 			)
-			w.conn.Close()
+			_ = w.conn.Close()
 		}
 
 		w.drainWriteChannel()
