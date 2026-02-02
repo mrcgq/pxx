@@ -32,20 +32,16 @@ type Stream struct {
 	connID    int32
 	CreatedAt time.Time
 
-	// TCP 连接
 	TCPConn net.Conn
 
-	// UDP 关联
 	UDPConn       *net.UDPConn
 	UDPAddr       *net.UDPAddr
 	UDPClientAddr *net.UDPAddr
 
-	// 数据通道
 	DataCh    chan []byte
 	Connected chan bool
 	CloseCh   chan struct{}
 
-	// 回调
 	OnClose func(id uint32)
 
 	mu        sync.RWMutex
@@ -66,12 +62,10 @@ func NewStream(id uint32, target string, isUDP bool) *Stream {
 	}
 }
 
-// SetConnID 设置绑定的连接 ID（线程安全）
 func (s *Stream) SetConnID(id int) {
 	atomic.StoreInt32(&s.connID, int32(id))
 }
 
-// GetConnID 获取绑定的连接 ID（线程安全）
 func (s *Stream) GetConnID() int {
 	return int(atomic.LoadInt32(&s.connID))
 }
@@ -103,16 +97,10 @@ func (s *Stream) Close() {
 		}
 		s.mu.Unlock()
 
-		// 排空数据通道 - 使用立即执行的匿名函数避免 SA4011
-		func() {
-			for {
-				select {
-				case <-s.DataCh:
-				default:
-					return
-				}
-			}
-		}()
+		// 排空数据通道
+		for len(s.DataCh) > 0 {
+			<-s.DataCh
+		}
 
 		if s.OnClose != nil {
 			s.OnClose(s.ID)
