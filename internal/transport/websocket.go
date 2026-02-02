@@ -503,20 +503,14 @@ func (w *WSConn) Close() {
 }
 
 func (w *WSConn) drainWriteChannel() {
-	for {
-		select {
-		case job, ok := <-w.writeCh:
-			if !ok {
-				return
+	// 使用 len() 检查避免 SA4011
+	for len(w.writeCh) > 0 {
+		job := <-w.writeCh
+		if job.Done != nil {
+			select {
+			case job.Done <- ErrConnectionClosed:
+			default:
 			}
-			if job.Done != nil {
-				select {
-				case job.Done <- ErrConnectionClosed:
-				default:
-				}
-			}
-		default:
-			return
 		}
 	}
 }
