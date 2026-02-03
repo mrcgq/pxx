@@ -1,24 +1,50 @@
-# .golangci.yml
+# .golangci.yml - 严格模式
 run:
   timeout: 5m
   modules-download-mode: readonly
+  skip-dirs:
+    - vendor
+    - third_party
+  skip-files:
+    - ".*_test.go"
 
 linters:
   enable:
-    - errcheck
-    - gosimple
-    - govet
-    - staticcheck
-    - unused
-    - ineffassign
+    - errcheck      # 检查错误返回值
+    - gosimple      # 简化代码建议
+    - govet         # Go 官方检查器
+    - staticcheck   # 包括 SA4011
+    - unused        # 未使用代码
+    - ineffassign   # 无效赋值
+    - gofmt         # 格式检查
+    - goimports     # import 检查
+    - misspell      # 拼写检查
+    - unconvert     # 不必要的类型转换
+    - unparam       # 未使用的函数参数
+
+linters-settings:
+  errcheck:
+    check-type-assertions: false
+    check-blank: false
+  
+  staticcheck:
+    # 不排除任何检查，包括 SA4011
+    checks: ["all"]
 
 issues:
   exclude-use-default: false
   max-issues-per-linter: 0
   max-same-issues: 0
   
+  # 只排除一些已知的误报
   exclude-rules:
-    # 临时排除 SA4011 - ineffective break
-    - linters:
-        - staticcheck
-      text: "SA4011"
+    # 允许在测试文件中使用 fmt.Println
+    - path: _test\.go
+      linters:
+        - forbidigo
+    
+    # 允许在 main.go 中使用 os.Exit
+    - path: cmd/.*main\.go
+      linters:
+        - gocritic
+      text: "exitAfterDefer"
