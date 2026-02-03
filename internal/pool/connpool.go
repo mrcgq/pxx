@@ -375,11 +375,13 @@ func (p *ConnPool) getConnectionTarget() (serverURL string, optimalIP string) {
 	return serverURL, optimalIP
 }
 
+// handleConnectFailure 处理连接失败，记录错误并决定是否切换模式
 func (p *ConnPool) handleConnectFailure(err error) {
 	mode := p.GetMode()
 
 	if mode == ModeDirect && p.cfg.ArgoFallback && p.cfg.ArgoTunnel != nil {
 		failures := atomic.AddInt32(&p.directFailures, 1)
+		plog.Debug("[Pool] 直连失败 (%d/%d): %v", failures, MaxDirectFailures, err)
 
 		if failures >= MaxDirectFailures {
 			plog.Warn("[Pool] 直连失败 %d 次，切换到 Argo 模式", failures)
