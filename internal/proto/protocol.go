@@ -1,6 +1,4 @@
-
-
-//internal/proto/protocol.go
+// internal/proto/protocol.go
 package proto
 
 import (
@@ -391,6 +389,12 @@ func (p *PaddingCalculator) normalPadding(currentSize int) int {
 	if maxPad > MaxPadding {
 		maxPad = MaxPadding
 	}
+
+	// 根据当前大小调整 padding 范围
+	if currentSize >= p.cfg.MinSize {
+		maxPad = maxPad / 2 // 已达到最小尺寸，减少 padding
+	}
+
 	mean := float64(maxPad) / 2
 	std := float64(maxPad) / 4
 	padding := int(p.rng.NormFloat64()*std + mean)
@@ -640,7 +644,3 @@ func DecodeAggregatedData(data []byte) (*AggregatedData, error) {
 	}
 	return agg, nil
 }
-
-
-
-
